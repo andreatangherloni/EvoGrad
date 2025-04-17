@@ -1,177 +1,180 @@
 import torch
 import torch.nn as nn
+from math import sqrt
+
 
 class GA(nn.Module):
-    """
-    """
+       
     def __init__(self,
                  obj_func,
-                 dim,
-                 pop_size=30,
+                 dim: int,
+                 pop_size: int = 30,
+                 init_sel_temp=1.0,
+                 init_mut_scale=0.1,
+                 init_cr=0.9,
+                 crossover="blend",      # "sbx", "undx", or "blend"
+                 eta_c=15.0,
                  lower_bound=None,
                  upper_bound=None,
-                 init_selection_temp=1.0,  # Gumbel-Softmax temperature
-                 init_mutation_scale=0.1,  # scale for Gaussian mutation
-                 initial_crossover=0.9,
-                 lr=0.001,
-                 optimizer=None,
-                 seed=42):
+                 seed: int | None = 0,
+                 lr: float = 0.001,
+                 device=None
+                ):
         
         super().__init__()
         
         self.obj_func = obj_func
-        self.dim = dim
+        self.dim      = dim
         self.pop_size = pop_size
-        
+        self.crossover = crossover 
+
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+
+        # ---------------- Initial search volume ----------------
+        if lower_bound is None:
+            lower_bound = [-100.0] * dim
+        if upper_bound is None:
+            upper_bound = [100.0] * dim
+            
+        self.register_buffer("lb", torch.tensor(lower_bound, dtype=torch.float32))
+        self.register_buffer("ub", torch.tensor(upper_bound, dtype=torch.float32))
+
         if seed is not None:
             torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
 
-        # Bounds for bounce
-        if lower_bound is None:
-            lower_bound = [-1.0] * self.dim
-        if upper_bound is None:
-            upper_bound = [1.0] * self.dim
-        self.register_buffer("lower_bound",
-            torch.tensor(lower_bound, dtype=torch.float32).unsqueeze(0)) # [1, dim]
-        self.register_buffer("upper_bound",
-            torch.tensor(upper_bound, dtype=torch.float32).unsqueeze(0)) # [1, dim]
+        genes = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        self.genes = nn.Parameter(genes)
 
-        # The population as a learnable parameter
-        init_genes = (self.lower_bound
-                      + (self.upper_bound - self.lower_bound)
-                      * torch.rand(pop_size, self.dim))
-        self.genes = nn.Parameter(init_genes)  # shape [N, dim]
-
-        # Hyperparameters
-        self.selection_temp = nn.Parameter(
-            torch.tensor([init_selection_temp], dtype=torch.float32))
-        self.mutation_scale = nn.Parameter(
-            torch.tensor([init_mutation_scale], dtype=torch.float32))
+        self.tau       = nn.Parameter(torch.tensor([init_sel_temp]))
+        self.mut_scale = nn.Parameter(torch.tensor([init_mut_scale]))
+        self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr))))
         
-        self.crossover_logits = nn.Parameter(torch.ones(dim)*initial_crossover)
+        # SBX index  (learnable so the optimiser can anneal it)
+        self.eta_c      = nn.Parameter(torch.tensor([eta_c]))
 
-        # Evaluate initial population if desired
         with torch.no_grad():
-            init_fitnesses = self.obj_func(self.genes)
+            f0 = obj_func(self.genes)
         
-        self.fitnesses = init_fitnesses.clone()
-        self.n_evals = self.genes.shape[0]
+        self.fitnesses = f0.clone()
+        self.fitnesses = self.fitnesses.to(self.device)
+        self.n_evals   = pop_size
         
-        best_idx = torch.argmin(self.fitnesses)
-        self.g_best_position = self.genes[best_idx].detach().clone()
-        self.g_best_fitness  = self.fitnesses[best_idx].detach().clone()
+        g_idx = torch.argmin(self.fitnesses)
+        self.best_f = self.fitnesses[g_idx].clone()
+        self.best_x = self.genes[g_idx].clone()
 
-        # If no external optimizer is provided, create a default
-        if optimizer is None:
-            self.optimizer = torch.optim.Adam(
-                [self.genes, self.selection_temp, self.mutation_scale, self.crossover_logits],
-                lr=lr
-            )
-        else:
-            self.optimizer = optimizer
+        self.optimizer = torch.optim.Adam([self.genes,
+                                           self.tau,
+                                           self.mut_scale,
+                                           self.cr_logits],
+                                          lr=lr)    
+
+    # ---------------- Gumbel reparam => alpha => continuous mixture #
+    def _soft_parent(self, logp):
+        g = -torch.log(-torch.log(torch.rand_like(logp, device=self.device) + 1e-8) + 1e-8)
+        alpha = torch.softmax(logp + g, dim=0)
+        return (alpha.unsqueeze(1) * self.genes).sum(dim=0)
+    
+    def _sbx(self, p1, p2, cr):
+        D = p1.shape[0]
+        eta = torch.clamp(self.eta_c, 1.0, 100.0)
+        # randomly decide which coords undergo SBX
+        mask = torch.rand(D, device=p1.device) < cr
+        u    = torch.rand(D, device=p1.device)
+        beta = torch.where(u <= 0.5,
+                           (2*u)**(1/(eta+1)),
+                           (2*(1-u))**(-1/(eta+1)))
+        beta = torch.where(mask, beta, torch.ones_like(beta))
+        c1   = 0.5*((1+beta)*p1 + (1-beta)*p2)
+        return c1
+    
+     # UNDX -------------------------------------------------------------- #
+    def _undx(self, p1, p2, p3):
+        # Implements Minimal‐Normal UNDX (Takagi + Ono)
+        base = 0.5*(p1 + p2)
+        d    = p2 - p1
+        norm = d.norm()
+        e_d  = d / (norm + 1e-12)
+        perp = p3 - base
+        perp = perp - (perp @ e_d) * e_d
+        sigma_xi, sigma_eta = 0.5, 0.35 / sqrt(self.dim)
+        xi   = torch.randn(1, device=p1.device) * sigma_xi * norm
+        eta  = torch.randn(self.dim, device=p1.device) * sigma_eta * norm
+        child = base + xi*e_d + eta*perp/ (perp.norm()+1e-12)
+        return child
 
 
     def forward(self):
-        """
-        """
         N, D = self.pop_size, self.dim
-        pop_old = self.genes
-        old_fit = self.fitnesses
+        temp = torch.clamp(self.tau, 1e-3, 5.0)
 
-        # find old best
-        old_best_val, old_best_idx = torch.min(old_fit, dim=0)
+        logp = -self.fitnesses / temp
+                
+        cr   = torch.sigmoid(self.cr_logits)
+        mut  = torch.clamp(self.mut_scale, 1e-5, 10.0)
 
-        # for soft selection
-        scores = -old_fit
-        temp_clamp = torch.clamp(self.selection_temp, min=1e-3, max=5.0)
-        logp = scores / temp_clamp
-        
-        def soft_sel():
-            # Gumbel reparam => alpha => continuous mixture
-            g = -torch.log(-torch.log(torch.rand_like(logp) + 1e-8) + 1e-8)
-            alpha = torch.softmax(logp + g, dim=0)  # shape [N]
-            # parent = sum_i alpha_i * pop_old[i]
-            return (alpha.unsqueeze(1)*pop_old).sum(dim=0)  # shape [dim]
-        
-        def dimension_wise_crossover(parent1, parent2):
-            """
-            """
-            alpha = torch.sigmoid(self.crossover_logits)  # shape [dim]
-            return alpha*parent1 + (1-alpha)*parent2
-
-        # build candidate population
-        candidate_list = []
+        # Crossover and mutation
+        offspring = []
         for _ in range(N):
-            # sample parent1
-            g1 = -torch.log(-torch.log(torch.rand_like(logp)+1e-8)+1e-8)
-            alpha1 = torch.softmax(logp + g1, dim=0) # shape [N]
-            parent1 = (alpha1.unsqueeze(1)*pop_old).sum(dim=0) # shape [dim]
+            p1 = self._soft_parent(logp)
+            p2 = self._soft_parent(logp)
+            if self.crossover == "sbx":
+                child = self._sbx(p1, p2, cr)            # SBX
+            elif self.crossover == "undx":
+                p3 = self._soft_parent(logp)
+                child = self._undx(p1, p2, p3)           # UNDX
+            else:                                        
+                child = cr * p1 + (1 - cr) * p2
 
-            # sample parent2
-            parent2 = soft_sel()
+            child += mut * torch.randn(D, device=self.device)    # mutation
 
-            # blend crossover
-            # beta = torch.rand(1)
-            # child = beta*parent1 + (1-beta)*parent2
-            child = dimension_wise_crossover(parent1, parent2)
+            # boundary bounce
+            lo, hi = child < self.lb, child > self.ub
+            child = torch.where(lo, 2*self.lb - child, child)
+            child = torch.where(hi, 2*self.ub - child, child)
+            
+            offspring.append(child.unsqueeze(0))
+        offspring = torch.cat(offspring, 0)
 
-            # continuous mutation
-            noise = torch.randn(D)
-            scale = torch.clamp(self.mutation_scale, 1e-5, 10.0)
-            child = child + scale*noise
+        fit_offspring = self.obj_func(offspring)
+        self.n_evals += N
 
-            candidate_list.append(child.unsqueeze(0))
+        best_old, idx_old = torch.min(self.fitnesses, 0)
+        best_kid, _       = torch.min(fit_offspring, 0)
+        pop_new, fit_new  = offspring.clone(), fit_offspring.clone()
+        
+        if best_old < best_kid:
+            worst = torch.argmax(fit_offspring)
+            pop_new[worst] = self.genes[idx_old]
+            fit_new[worst] = best_old
 
-        cand_genes = torch.cat(candidate_list, dim=0) # shape [N, dim]
+        best_val, best_idx = torch.min(fit_new, 0)
+        self._cand = {
+            "population": pop_new,
+            "fitness":    fit_new,
+            "best_f":     best_val,
+            "best_x":     pop_new[best_idx].detach(),
+            "hyperparams": {
+                "selection_temp": temp.detach(),
+                "mutation_scale": mut.detach(),
+                "crossover_rate": cr.detach(),
+            },
+        }
+        return best_val
 
-        # boundary bounce
-        mask_lower = cand_genes < self.lower_bound
-        mask_upper = cand_genes > self.upper_bound
-        bounced_lower= 2*self.lower_bound - cand_genes
-        bounced_upper= 2*self.upper_bound - cand_genes
-        cand_genes = torch.where(mask_lower, bounced_lower, cand_genes)
-        cand_genes = torch.where(mask_upper, bounced_upper, cand_genes)
-
-        # single objective call => new fitnesses
-        cand_fit = self.obj_func(cand_genes)
-        self.n_evals += cand_genes.shape[0]
-
-        # find new best & worst
-        cand_best_val, _ = torch.min(cand_fit, dim=0)
-        _, cand_worst_idx= torch.max(cand_fit, dim=0)
-
-        # elitism: if old_best_val < cand_best_val => replace worst with old best
-        replaced_genes = cand_genes.clone()
-        replaced_fit   = cand_fit.clone()
-
-        if old_best_val < cand_best_val:
-            replaced_genes[cand_worst_idx] = pop_old[old_best_idx]
-            replaced_fit[cand_worst_idx]   = old_best_val
-
-        # final best
-        final_best_val, final_best_idx = torch.min(replaced_fit, dim=0)
-
-        # store candidate buffers
-        self._cand_genes        = replaced_genes
-        self._cand_fitnesses    = replaced_fit
-        self._cand_best_fit     = final_best_val
-        self._cand_best_idx     = final_best_idx
-
-        return final_best_val
-
-    
+    # --------------------------------------------------------------------- #
+    @torch.no_grad()
     def update_state(self):
-        """
-        """
-        with torch.no_grad():
-            # commit
-            self.genes.copy_(self._cand_genes)
-            self.genes.requires_grad_(True)
+        self.genes.copy_(self._cand["population"])
+        self.genes.requires_grad_(True)
+        self.fitnesses.copy_(self._cand["fitness"].detach())
 
-            self.fitnesses.copy_(self._cand_fitnesses.detach())
+        if self._cand["best_f"] < self.best_f:
+            self.best_f.copy_(self._cand["best_f"].detach())
+            self.best_x.copy_(self._cand["best_x"])
 
-            # global best
-            if self._cand_best_fit < self.g_best_fitness:
-                self.g_best_fitness.copy_(self._cand_best_fit.detach())
-                self.g_best_position.copy_(self._cand_genes[self._cand_best_idx].detach())
+        self.optimizer.zero_grad(set_to_none=True)

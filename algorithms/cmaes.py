@@ -1,147 +1,220 @@
+# differentiable_cmaes.py
+import math
 import torch
 import torch.nn as nn
 
+def _expected_norm(dim: int) -> float:
+    """
+    E||N(0, I)||  (accurate to O(1/dim))
+    Ref: Hansen 2013 tutorial
+    """
+    d = float(dim)
+    return math.sqrt(d) * (1.0 - 1. / (4 * d) + 1. / (21 * d * d))
+
+
 class CMAES(nn.Module):
-    """
-    """
+
     def __init__(self,
                  obj_func,
-                 dim,
-                 pop_size=30,
+                 dim: int,
+                 pop_size: int = 30,
+                 init_sigma: float = 0.3,
                  lower_bound=None,
                  upper_bound=None,
-                 init_sigma=0.3,
-                 lr=0.001,
-                 optimizer=None,
-                 seed=42):
+                 seed: int | None = 0,
+                 lr: float = 0.001,
+                 device=None
+                 ):
         
         super().__init__()
         self.obj_func = obj_func
-        self.dim = dim
+        self.dim      = dim
         self.pop_size = pop_size
-        
-        if seed is not None:
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
-
-        if lower_bound is None:
-            lower_bound = [-5.0]*dim
-        if upper_bound is None:
-            upper_bound = [5.0]*dim
-        self.register_buffer("lower_bound", torch.tensor(lower_bound, dtype=torch.float32))
-        self.register_buffer("upper_bound", torch.tensor(upper_bound, dtype=torch.float32))
-
-        # mean
-        lb = torch.tensor(lower_bound, dtype=torch.float32)
-        ub = torch.tensor(upper_bound, dtype=torch.float32)
-        init_m = 0.5*(lb+ub)
-        self.m = nn.Parameter(init_m) # shape [dim]
-        
-        # L_tri
-        init_L = torch.eye(dim, dtype=torch.float32)*init_sigma
-        self.L_tri = nn.Parameter(init_L)
-
-        # Evaluate initial single-sample for old best
-        with torch.no_grad():
-            init_fitness = self.obj_func(self.m.unsqueeze(0))
-        
+        self.mu       = pop_size // 2  # number of selected parents
+                
         self.fitnesses = torch.full((pop_size,), torch.finfo(torch.float32).max )
         
-        # We store a global best from prior iterations
-        self.g_best_fitness = init_fitness[0].detach().clone()
-        self.g_best_position= self.m.detach().clone()
-        self.n_evals = self.m.shape[0]
-
-        if optimizer is None:
-            self.optimizer = torch.optim.Adam([self.m, self.L_tri], lr=lr)
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
-            self.optimizer = optimizer
+            self.device = device
 
+        # ---------------- Initial search volume ----------------
+        if lower_bound is None:
+            lower_bound = [-100.0] * dim
+        if upper_bound is None:
+            upper_bound = [100.0] * dim
+            
+        self.register_buffer("lb", torch.tensor(lower_bound, dtype=torch.float32))
+        self.register_buffer("ub", torch.tensor(upper_bound, dtype=torch.float32))
+
+        if seed is not None:
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+
+        # Mean parameter 
+        init_m = 0.5 * (self.lb + self.ub)
+        self.m = nn.Parameter(init_m)
+
+        # log‑sigma so that \sigma = exp(\sigma) is positive and differentiable
+        self.log_sigma = nn.Parameter(torch.tensor(math.log(init_sigma)))
+
+        # Cholesky factor of C (normalised to det = 1 initially)
+        self.L_tri = nn.Parameter(torch.eye(dim, dtype=torch.float32))
+
+        # ---------------- Learnable hyperparameters -----------------------
+        # They are in (0,1); we can store logits and map with sigmoid
+        def _inv_sigmoid(x):
+            eps = 1e-6
+            x = min(max(x, eps), 1 - eps)
+            return math.log(x / (1 - x))
+
+        self._raw_cc   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim)))
+        self._raw_cs   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim)))
+        self._raw_c1   = nn.Parameter(torch.tensor(_inv_sigmoid(2.0 / (dim**2))))
+        self._raw_cmu  = nn.Parameter(torch.tensor(_inv_sigmoid(0.4)))  # heuristic
+        self._raw_damp = nn.Parameter(torch.tensor(math.log(1.0 + 2.0)))
+
+        # ---------------- Evolution paths (buffers, not optimised with backpropagation) ------------
+        self.register_buffer("p_c", torch.zeros(dim))
+        self.register_buffer("p_sigma", torch.zeros(dim))
+        self.register_buffer("iter_idx", torch.tensor(0))
+
+        with torch.no_grad():
+            init_fit = self.obj_func(self.m.unsqueeze(0))
+        
+        self.register_buffer("best_f", init_fit.clone())
+        self.register_buffer("best_x", self.m.clone().detach())
+        self.n_evals = 1
+
+        # Adam optimiser for exploitation & hyperparameters learning
+        self.optimizer = torch.optim.Adam([self.m,
+                                           self.log_sigma,
+                                           self.L_tri,
+                                           self._raw_cc,
+                                           self._raw_cs,
+                                           self._raw_c1,
+                                           self._raw_cmu,
+                                           self._raw_damp
+                                           ],
+                                          lr=lr)
+
+    def _decode_coeffs(self):
+        """Decode sigmoids & clamp to obey c1 + c_mu ≤ 1"""
+        cc  = torch.sigmoid(self._raw_cc)
+        cs  = torch.sigmoid(self._raw_cs)
+        c1  = torch.sigmoid(self._raw_c1)
+        cmu = torch.sigmoid(self._raw_cmu)
+
+        total = (c1 + cmu).item() 
+        if total > 0.999: # softly rescale to keep valid
+            c1 = c1 / total * 0.999
+            cmu = cmu / total * 0.999
+        damps = self._raw_damp.exp()
+        return cc, cs, c1, cmu, damps
+
+    # -------------------------------------------------------------------------
+    # Main differentiable evolutionary generation
+    # -------------------------------------------------------------------------
     def forward(self):
-        """
-        Single-eval iteration with elitism:
+        """Run one CMAES generation and return the scalar best fitness of that generation"""
+        N, D, mu = self.pop_size, self.dim, self.mu
+        cc, cs, c1, c_mu, damps = self._decode_coeffs()
 
-         1) Sample population x_i = m + L @ eps
-         2) Boundary bounce
-         3) Evaluate => single objective
-         4) Elitism: if old best < new best => replace worst w/ old best
-         5) Soft weighting => produce candidate (m_new, L_new)
-         6) Return best new fitness as scalar loss
-        """
-        N, D = self.pop_size, self.dim
-
-        # Lower-tri factor
+        # Lower‑triangular factor (guaranteed tri‑angular) 
         L = torch.tril(self.L_tri)
 
-        # (1) Sample population
-        eps = torch.randn(N, D, device=self.m.device)
-        pop = self.m.unsqueeze(0) + eps @ L.T  # shape [N, dim]
+        # (1) sampling (re‑parameterisation semantics) 
+        z = torch.randn(N, D, device=self.device)                   # ~ N(0,I)
+        y = (L @ z.T).T                                          # shape [N,D]
+        self.sigma = self.log_sigma.exp()
+        x = self.m + self.sigma * y                              # phenotypes
 
-        # (2) Boundary bounce
-        lb = self.lower_bound
-        ub = self.upper_bound
-        pop = torch.max(pop, lb)
-        pop = torch.min(pop, ub)
+        # (2) Boundary conditions
+        x = torch.max(torch.min(x, self.ub), self.lb)
 
-        # (3) Evaluate
-        fitnesses = self.obj_func(pop)  # shape [N]
-        self.n_evals += pop.shape[0]
+        # (3) Fitness evaluation
+        fitness = self.obj_func(x)
+        self.n_evals += N
+
+        # (4) Sort and parent weights
+        idx_sorted = torch.argsort(fitness)                     
+        idx_sel = idx_sorted[:mu]
+        y_sel = y[idx_sel] # parents in y‑space
         
-        best_fit, _ = torch.min(fitnesses, dim=0)
-        _, worst_idx = torch.max(fitnesses, dim=0)
-
-        # (4) Elitism: if self.g_best_fitness < best_fit => replace worst
-        replaced_pop = pop.clone()
-        replaced_fit = fitnesses.clone()
-
-        if self.g_best_fitness < best_fit:
-            replaced_pop[worst_idx] = self.g_best_position
-            replaced_fit[worst_idx] = self.g_best_fitness
-
-        # Now final best after elitism
-        final_best_val, final_best_idx = torch.min(replaced_fit, dim=0)
-
-        # (5) Soft weighting => new (m, L) using replaced_pop
-        scores = -replaced_fit
-        w = torch.softmax(scores, dim=0)
-        m_new = (w.unsqueeze(1)*replaced_pop).sum(dim=0)
-
-        # Cov update
-        diffs = replaced_pop - m_new.unsqueeze(0)
-        C_new = torch.zeros(D, D, dtype=torch.float32, device=pop.device)
-        for i in range(N):
-            C_new += w[i]*(diffs[i].unsqueeze(1) @ diffs[i].unsqueeze(0))
-        # factor
-        diag_idx = torch.arange(D, device=pop.device)
-        C_new[diag_idx, diag_idx] += 1e-5
-        # C_new = 0.5*(C_new + C_new.T)
+        mu_fac = torch.tensor(mu + 0.5, dtype=torch.float32, device=self.device)
+        w_raw = torch.log(mu_fac) - torch.log(torch.arange(1, mu + 1, device=self.device, dtype=torch.float32))
         
+        w = w_raw / w_raw.sum() # normalise (\sum w = 1)
+        mu_eff = 1.0 / torch.sum(w ** 2)
+
+        y_w = torch.sum(w.view(-1, 1) * y_sel, dim=0) # weighted mean
+
+        # (5) Evolution paths     
+        z_w = torch.linalg.solve_triangular(L, y_w.unsqueeze(-1), upper=False ).squeeze(-1)
+        
+        p_sigma_new = (1 - cs) * self.p_sigma + torch.sqrt(cs * (2 - cs) * mu_eff) * z_w
+
+        # heuristic h_σ  (smoothed hard threshold)
+        chi_n = _expected_norm(D)
+        norm_p_sigma = p_sigma_new.norm()
+        h_sigma = torch.sigmoid(10 * (1.4 + 2.0 / (D + 1) - norm_p_sigma / chi_n))
+
+        p_c_new = (1 - cc) * self.p_c + h_sigma * torch.sqrt(cc * (2 - cc) * mu_eff) * y_w
+
+        # (6) Covariance update
+        C = L @ L.T
+        rank_mu = (w.view(-1, 1, 1) * y_sel.unsqueeze(-1) * y_sel.unsqueeze(-2)).sum(dim=0)
+        C_new = (1 - c1 - c_mu) * C + c1 * torch.ger(p_c_new, p_c_new) + c_mu * rank_mu
+
+        # Mumerical safety for Cholesky decomposition
+        diag = torch.arange(D, device=self.device)
+        C_new[diag, diag] += 1e-7
         L_new = torch.linalg.cholesky(C_new)
 
-        # (6) Store candidate
-        self._cand_pop = replaced_pop
-        self._cand_fitnesses = replaced_fit
-        self._cand_best_fit = final_best_val
-        self._cand_best_idx = final_best_idx
-        self._cand_m = m_new
-        self._cand_L = L_new
-        
-        return final_best_val
+        # (7) step‑size update
+        sigma_factor = torch.exp((cs / damps) * (norm_p_sigma / chi_n - 1.0))
+        sigma_new = self.sigma * sigma_factor
 
-    def update_state(self):
-        """
-        """
-        with torch.no_grad():
-            # commit new m, L
-            self.m.copy_(self._cand_m)
-            self.m.requires_grad_(True)
+        m_new = self.m + self.sigma * y_w
 
-            self.L_tri.copy_(self._cand_L)
-            self.L_tri.requires_grad_(True)
+        best_val = fitness[idx_sorted[0]]
+        best_x   = x[idx_sorted[0]].detach()
+
+        # Commit candidate results so the graph stays intact
+        # We do not detach everything remains differentiable
+        self._cand = {
+            "m":           m_new,
+            "log_sigma":   torch.log(sigma_new),
+            "L_tri":       L_new,
+            "p_c":         p_c_new,
+            "p_sigma":     p_sigma_new,
+            "fitness":     fitness,
+            "best_f":      best_val,
+            "best_x":      best_x,
             
-            self.fitnesses.copy_(self._cand_fitnesses.detach())
+            "hyperparams": {
+                "sigma": sigma_new.detach(),
+                "cc":    cc.detach(),
+                "cs":    cs.detach(),
+                "c1":    c1.detach(),
+                "c_mu":  c_mu.detach(),
+                "damp":  damps.detach(),
+            },
+        }
+        return best_val
+    
+    # --------------------------------------------------------------------- #
+    @torch.no_grad()
+    def update_state(self):
+        self.m.copy_(self._cand["m"])
+        self.log_sigma.copy_(self._cand["log_sigma"])
+        self.L_tri.copy_(self._cand["L_tri"])
+        self.p_c.copy_(self._cand["p_c"])
+        self.p_sigma.copy_(self._cand["p_sigma"])
+        self.fitnesses.copy_(self._cand["fitness"].detach())
 
-            # possibly update global best
-            if self._cand_best_fit < self.g_best_fitness:
-                self.g_best_fitness.copy_(self._cand_best_fit.detach())
-                self.g_best_position.copy_(self._cand_pop[self._cand_best_idx].detach())
+        # keep best‑so‑far
+        if self._cand["best_f"] < self.best_f:
+            self.best_f.copy_(self._cand["best_f"])
+            self.best_x.copy_(self._cand["best_x"])

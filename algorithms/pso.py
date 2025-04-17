@@ -2,158 +2,144 @@ import torch
 import torch.nn as nn
 
 class PSO(nn.Module):
-    """
-    """
-
+        
     def __init__(self,
-                 obj_func,
-                 dim,
-                 pop_size=30,
-                 lower_bound=None,
-                 upper_bound=None,
-                 init_inertia=0.7,
-                 init_cognitive=1.4,
-                 init_social=1.4,
-                 init_v_min=-1,
-                 init_v_max=1,
-                 lr=0.001,
-                 optimizer=None,
-                 seed=42):
+                obj_func,
+                dim: int,
+                pop_size: int = 30,
+                init_inertia=0.7,
+                init_cognitive=1.4,
+                init_social=1.4,
+                init_v_min=-1,
+                init_v_max=1,
+                lower_bound=None,
+                upper_bound=None,
+                seed: int | None = 0,
+                lr: float = 0.001,
+                device=None
+                ):
+    
         super().__init__()
         
         self.obj_func = obj_func
-        self.dim = dim
+        self.dim      = dim
         self.pop_size = pop_size
         
-        if seed is not None:
-            torch.manual_seed(seed)
-            torch.cuda.manual_seed(seed)
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
 
-        # Bounds
+        # ---------------- Initial search volume ----------------
         if lower_bound is None:
             lower_bound = [-100.0] * dim
         if upper_bound is None:
             upper_bound = [100.0] * dim
+        
+        if seed is not None:
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+        
+        self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
+        self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
 
-        self.register_buffer(
-            "lower_bound",
-            torch.tensor(lower_bound, dtype=torch.float32).unsqueeze(0)  # shape [1, dim]
-        )
-        self.register_buffer(
-            "upper_bound",
-            torch.tensor(upper_bound, dtype=torch.float32).unsqueeze(0)  # shape [1, dim]
-        )
-        
-        # Per-particle velocity bounds
-        self.v_min = nn.Parameter(torch.full((pop_size, 1), init_v_min, dtype=torch.float32))
-        self.v_max = nn.Parameter(torch.full((pop_size, 1), init_v_max, dtype=torch.float32))
-        
-        # Positions as a learnable parameter
-        init_positions = (self.lower_bound + (self.upper_bound - self.lower_bound)* torch.rand(pop_size, dim))
-        self.positions = nn.Parameter(init_positions)  # shape [swarm_size, dim]
-        
-        # Velocities
-        self.velocities = torch.zeros_like(self.positions)
+        # state --------------------------------------------------------------
+        init_pos = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        self.pos = nn.Parameter(init_pos)
+        self.vel = torch.zeros_like(self.pos, device=self.device)
 
-        # Evaluate initial fitness & personal best
         with torch.no_grad():
-            init_fitnesses = self.obj_func(self.positions)
+            f0 = obj_func(self.pos)
         
-        self.fitnesses = init_fitnesses.clone()
-        self.n_evals   = self.pop_size
+        self.fitnesses = f0.clone()
+        self.fitnesses = self.fitnesses.to(self.device)
+        self.n_evals   = pop_size
 
-        self.p_best_positions = self.positions.clone().detach()
-        self.p_best_fitnesses = self.fitnesses.detach()
+        self.p_best_pos = self.pos.clone().detach()
+        self.p_best_fit = self.fitnesses.clone().detach()
+        
+        self.p_best_pos =  self.p_best_pos.to(self.device)
+        self.p_best_fit =  self.p_best_fit.to(self.device)
+        
+        g_idx = torch.argmin(self.p_best_fit)
+        self.best_f = self.p_best_fit[g_idx].clone()
+        self.best_x = self.p_best_pos[g_idx].clone()
 
-        # Global best
-        best_idx = torch.argmin(self.p_best_fitnesses)
-        self.g_best_fitness = self.p_best_fitnesses[best_idx].clone()
-        self.g_best_position = self.p_best_positions[best_idx].clone()
+        # learnable hyper‑parameters ----------------------------------------
+        eye = torch.ones(pop_size, 1)
+        self.inertia   = nn.Parameter(init_inertia   * eye)
+        self.cognitive = nn.Parameter(init_cognitive * eye)
+        self.social    = nn.Parameter(init_social    * eye)
+        self.v_min     = nn.Parameter(init_v_min * eye)
+        self.v_max     = nn.Parameter(init_v_max * eye)
         
-        # Particle-wise hyperparams
-        self.inertia   = nn.Parameter(torch.full((pop_size,1), init_inertia,   dtype=torch.float32))
-        self.cognitive = nn.Parameter(torch.full((pop_size,1), init_cognitive, dtype=torch.float32))
-        self.social    = nn.Parameter(torch.full((pop_size,1), init_social,    dtype=torch.float32))
-        
-        # Default optimizer if none provided
-        if optimizer is None:
-            self.optimizer = torch.optim.Adam(
-                [self.positions, self.inertia, self.cognitive, self.social,
-                 self.v_min, self.v_max],
-                lr=lr
-            )
-        else:
-            self.optimizer = optimizer
-    
+        self.optimizer = torch.optim.Adam([self.pos,
+                                           self.inertia,
+                                           self.cognitive,
+                                           self.social,
+                                           self.v_min,
+                                           self.v_max
+                                           ],
+                                          lr=lr) 
+
+    # --------------------------------------------------------------------- #
     def forward(self):
-        """
-        """
+        "one PSO generation (differentiable)"
+        r1, r2 = torch.rand_like(self.pos), torch.rand_like(self.pos)
         
-        # -- Velocity update --
-        r1 = torch.rand_like(self.positions)
-        r2 = torch.rand_like(self.positions)
-        
-        cognitive_term = self.cognitive * r1 * (self.p_best_positions - self.positions)
-        social_term    = self.social    * r2 * (self.g_best_position - self.positions)
-        
-        new_velocities = self.inertia * self.velocities + cognitive_term + social_term
-        # clamp velocities
-        new_velocities = torch.clamp(new_velocities, min=self.v_min, max=self.v_max)
+        cog = self.cognitive * r1 * (self.p_best_pos - self.pos)
+        soc = self.social    * r2 * (self.best_x - self.pos)
 
-        # candidate positions
-        candidate_positions = self.positions + new_velocities
+        vel_new = self.inertia * self.vel + cog + soc
+        vel_new = torch.clamp(vel_new, min=self.v_min, max=self.v_max)
         
-        # boundary bounce
-        mask_lower    = candidate_positions < self.lower_bound
-        bounced_lower = 2*self.lower_bound - candidate_positions
-        mask_upper    = candidate_positions > self.upper_bound
-        bounced_upper = 2*self.upper_bound - candidate_positions
+        pos_new = self.pos + vel_new
+        mask_lo, mask_hi = pos_new < self.lb, pos_new > self.ub
+        
+        pos_new = torch.where(mask_lo, 2 * self.lb - pos_new, pos_new)
+        pos_new = torch.where(mask_hi, 2 * self.ub - pos_new, pos_new)
+        vel_new = torch.where(mask_lo | mask_hi, -vel_new, vel_new)
 
-        candidate_positions = torch.where(mask_lower, bounced_lower, candidate_positions)
-        candidate_positions = torch.where(mask_upper, bounced_upper, candidate_positions)
-        new_velocities      = torch.where(mask_lower|mask_upper, -new_velocities, new_velocities)
-
-        # Evaluate candidate positions => single objective call
-        cand_fitnesses = self.obj_func(candidate_positions)
+        fit_new = self.obj_func(pos_new)
         self.n_evals += self.pop_size
 
-        # Update personal best: if new_fitness < p_best_fitness => improved
-        improved = (cand_fitnesses < self.p_best_fitnesses)
-        cand_p_best_positions = torch.where(improved.unsqueeze(1),
-                                            candidate_positions,
-                                            self.p_best_positions)
-        cand_p_best_fitnesses = torch.where(improved, cand_fitnesses, self.p_best_fitnesses)
+        # Personal best -----------------------------------------------------
+        improved = fit_new < self.p_best_fit
+        p_best_pos_new = torch.where(improved.unsqueeze(1), pos_new, self.p_best_pos)
+        p_best_fit_new = torch.where(improved,             fit_new, self.p_best_fit)
 
-        # Then define iteration's best as min of new_fitnesses 
-        # (or cand_p_best_fitnesses, either approach is possible)
-        cand_best_fitness, cand_idx = torch.min(cand_fitnesses, dim=0)
+        best_val, best_idx = torch.min(fit_new, 0)
 
-        # store
-        self._cand_positions  = candidate_positions
-        self._cand_velocities = new_velocities
-        self._cand_fitnesses  = cand_fitnesses
-        self._cand_best_fit   = cand_best_fitness
-        self._cand_best_idx   = cand_idx
-        self._cand_p_best_positions = cand_p_best_positions
-        self._cand_p_best_fitnesses = cand_p_best_fitnesses
+        # Candidate dict ----------------------------------------------------
+        self._cand = {
+            "positions":  pos_new,
+            "velocities": vel_new,
+            "fitness":    fit_new,
+            "best_f":     best_val,
+            "best_x":     pos_new[best_idx].detach(),
+            "p_best_pos": p_best_pos_new,
+            "p_best_fit": p_best_fit_new,
+            "hyperparams": {
+                "inertia":   self.inertia.detach(),
+                "cognitive": self.cognitive.detach(),
+                "social":    self.social.detach(),
+                "v_min":     self.v_min.detach(),
+                "v_max":     self.v_max.detach(),
+            },
+        }
+        return best_val
 
-        return cand_best_fitness
-
+    # --------------------------------------------------------------------- #
+    @torch.no_grad()
     def update_state(self):
-        """
-        """
-        with torch.no_grad():
-            # finalize
-            self.positions.copy_(self._cand_positions)
-            self.positions.requires_grad_(True)
+        self.pos.copy_(self._cand["positions"])
+        self.pos.requires_grad_(True)
+        self.vel.copy_(self._cand["velocities"])
+        self.fitnesses.copy_(self._cand["fitness"].detach())
 
-            self.velocities.copy_(self._cand_velocities)
-            self.fitnesses.copy_(self._cand_fitnesses.detach())
+        self.p_best_pos.copy_(self._cand["p_best_pos"].detach())
+        self.p_best_fit.copy_(self._cand["p_best_fit"].detach())
 
-            self.p_best_positions.copy_(self._cand_p_best_positions.detach())
-            self.p_best_fitnesses.copy_(self._cand_p_best_fitnesses.detach())
-
-            # update global best
-            if self._cand_best_fit < self.g_best_fitness:
-                self.g_best_fitness.copy_(self._cand_best_fit.detach())
-                self.g_best_position.copy_(self._cand_p_best_positions[self._cand_best_idx].detach())
+        if self._cand["best_f"] < self.best_f:
+            self.best_f.copy_(self._cand["best_f"].detach())
+            self.best_x.copy_(self._cand["best_x"])
