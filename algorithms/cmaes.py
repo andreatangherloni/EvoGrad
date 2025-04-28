@@ -17,7 +17,7 @@ class CMAES(nn.Module):
                  obj_func,
                  dim: int,
                  pop_size: int = 30,
-                 init_sigma: float = 0.3,
+                 init_sigma: float = 0.5,
                  lower_bound=None,
                  upper_bound=None,
                  initialisation='uniform',
