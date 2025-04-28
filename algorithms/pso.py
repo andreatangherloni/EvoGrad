@@ -14,6 +14,8 @@ class PSO(nn.Module):
                 init_v_max=1,
                 lower_bound=None,
                 upper_bound=None,
+                initialisation='uniform',
+                log_movement=False,
                 seed: int | None = 0,
                 lr: float = 0.001,
                 device=None
@@ -24,6 +26,7 @@ class PSO(nn.Module):
         self.obj_func = obj_func
         self.dim      = dim
         self.pop_size = pop_size
+        self.log_movement = log_movement
         
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,16 +43,31 @@ class PSO(nn.Module):
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
         
-        self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
-        self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
+        if self.log_movement:
+            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+        else:            
+            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
 
-        # state --------------------------------------------------------------
-        init_pos = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        # state --------------------------------------------------------------        
+        if initialisation == "log" and log_movement==False:
+            init_pos = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim))
+        else:
+            init_pos = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        
         self.pos = nn.Parameter(init_pos)
         self.vel = torch.zeros_like(self.pos, device=self.device)
 
-        with torch.no_grad():
-            f0 = obj_func(self.pos)
+        with torch.no_grad():            
+            if self.log_movement:
+                x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.pos
+                x = 10**x
+                f0 = self.obj_func(x)
+            else:
+                f0 = self.obj_func(self.pos)
         
         self.fitnesses = f0.clone()
         self.fitnesses = self.fitnesses.to(self.device)
@@ -99,8 +117,14 @@ class PSO(nn.Module):
         pos_new = torch.where(mask_lo, 2 * self.lb - pos_new, pos_new)
         pos_new = torch.where(mask_hi, 2 * self.ub - pos_new, pos_new)
         vel_new = torch.where(mask_lo | mask_hi, -vel_new, vel_new)
-
-        fit_new = self.obj_func(pos_new)
+        
+        if self.log_movement:
+            x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*pos_new
+            x = 10**x
+            fit_new = self.obj_func(x)
+        else:
+            fit_new = self.obj_func(pos_new)
+        
         self.n_evals += self.pop_size
 
         # Personal best -----------------------------------------------------

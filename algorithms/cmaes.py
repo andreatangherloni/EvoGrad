@@ -1,4 +1,3 @@
-# differentiable_cmaes.py
 import math
 import torch
 import torch.nn as nn
@@ -21,6 +20,8 @@ class CMAES(nn.Module):
                  init_sigma: float = 0.3,
                  lower_bound=None,
                  upper_bound=None,
+                 initialisation='uniform',
+                 log_movement=False,
                  seed: int | None = 0,
                  lr: float = 0.001,
                  device=None
@@ -31,8 +32,9 @@ class CMAES(nn.Module):
         self.dim      = dim
         self.pop_size = pop_size
         self.mu       = pop_size // 2  # number of selected parents
+        self.log_movement = log_movement
                 
-        self.fitnesses = torch.full((pop_size,), torch.finfo(torch.float32).max )
+        self.fitnesses = torch.full((pop_size,), torch.finfo(torch.float32).max)
         
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -45,15 +47,25 @@ class CMAES(nn.Module):
         if upper_bound is None:
             upper_bound = [100.0] * dim
             
-        self.register_buffer("lb", torch.tensor(lower_bound, dtype=torch.float32))
-        self.register_buffer("ub", torch.tensor(upper_bound, dtype=torch.float32))
+        if self.log_movement:
+            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+        else:            
+            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
 
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
 
-        # Mean parameter 
-        init_m = 0.5 * (self.lb + self.ub)
+        # Mean parameter      
+        if initialisation == "log" and log_movement==False:
+            init_m = 0.5 * (torch.log(self.lb) + torch.log(self.ub))
+        else:
+            init_m = 0.5 * (self.lb + self.ub)
+        
         self.m = nn.Parameter(init_m)
 
         # log‑sigma so that \sigma = exp(\sigma) is positive and differentiable
@@ -79,13 +91,18 @@ class CMAES(nn.Module):
         self.register_buffer("p_c", torch.zeros(dim))
         self.register_buffer("p_sigma", torch.zeros(dim))
         self.register_buffer("iter_idx", torch.tensor(0))
-
-        with torch.no_grad():
-            init_fit = self.obj_func(self.m.unsqueeze(0))
         
-        self.register_buffer("best_f", init_fit.clone())
+        with torch.no_grad():
+            if self.log_movement:
+                x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.m
+                x = 10**x                
+                f0 = self.obj_func(x.squeeze(0))
+            else:
+                f0 = self.obj_func(self.m.squeeze(0))
+                    
+        self.register_buffer("best_f", f0.clone())
         self.register_buffer("best_x", self.m.clone().detach())
-        self.n_evals = 1
+        self.n_evals = 0
 
         # Adam optimiser for exploitation & hyperparameters learning
         self.optimizer = torch.optim.Adam([self.m,
@@ -134,7 +151,15 @@ class CMAES(nn.Module):
         x = torch.max(torch.min(x, self.ub), self.lb)
 
         # (3) Fitness evaluation
-        fitness = self.obj_func(x)
+        # fitness = self.obj_func(x)
+        
+        if self.log_movement:
+            x_log = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*x
+            x_log = 10**x_log
+            fitness = self.obj_func(x_log)
+        else:
+            fitness = self.obj_func(x)
+        
         self.n_evals += N
 
         # (4) Sort and parent weights

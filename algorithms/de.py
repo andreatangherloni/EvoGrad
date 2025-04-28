@@ -1,4 +1,5 @@
-import torch, torch.nn as nn
+import torch
+import torch.nn as nn
 
 class DE(nn.Module):
     """
@@ -11,12 +12,14 @@ class DE(nn.Module):
                 obj_func,
                 dim: int,
                 pop_size: int = 30,
-                init_sel_temp=1.0,
+                init_tau=0.8,
                 init_F=2.,
                 init_cr=0.9,
                 mutation="rand/1",
                 lower_bound=None,
                 upper_bound=None,
+                initialisation='uniform',
+                log_movement=False,
                 seed: int | None = 0,
                 lr: float = 0.001,
                 device=None
@@ -28,6 +31,7 @@ class DE(nn.Module):
         self.dim       = dim
         self.pop_size  = pop_size
         self.mutation  = mutation
+        self.log_movement = log_movement
         
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -43,19 +47,34 @@ class DE(nn.Module):
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-
-        self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
-        self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
-
-        pop0 = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        
+        if self.log_movement:
+            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+        else:            
+            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            
+        if initialisation == "log" and log_movement==False:
+            pop0 = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim))
+        else:
+            pop0 = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        
         self.pop = nn.Parameter(pop0)
 
         self.F         = nn.Parameter(torch.tensor([init_F]))
-        self.tau       = nn.Parameter(torch.tensor([init_sel_temp]))
+        self.tau       = nn.Parameter(torch.tensor([init_tau]))
         self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr))))
 
         with torch.no_grad():
-            f0 = obj_func(self.pop)
+            if log_movement:
+                x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.pop
+                x = 10**x
+                f0 = obj_func(x)
+            else:
+                f0 = obj_func(self.pop)
         
         self.fitnesses = f0.clone()
         self.fitnesses = self.fitnesses.to(self.device)
@@ -114,7 +133,14 @@ class DE(nn.Module):
             offspring.append(child)
         
         offspring = torch.cat(offspring, 0)
-        fit_offspring = self.obj_func(offspring)
+        
+        if self.log_movement:
+            x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*offspring
+            x = 10**x
+            fit_offspring = self.obj_func(x)
+        else:
+            fit_offspring = self.obj_func(offspring)
+        
         self.n_evals += N
         
         # best_old, idx_old = torch.min(self.fitnesses, 0)

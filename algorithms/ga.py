@@ -2,20 +2,25 @@ import torch
 import torch.nn as nn
 from math import sqrt
 
-
 class GA(nn.Module):
        
     def __init__(self,
                  obj_func,
                  dim: int,
                  pop_size: int = 30,
-                 init_sel_temp=1.0,
+                 tau_c=0.8,
+                 tau_m=0.1,
                  init_mut_scale=0.1,
-                 init_cr=0.9,
-                 crossover="blend",      # "sbx", "undx", or "blend"
+                 init_cr=1.0,
+                 init_mr=None,
+                 crossover="sbx",      # "sbx", "undx", or "blend"
+                 mutation="pm",
                  eta_c=15.0,
+                 eta_m=20.0,
                  lower_bound=None,
                  upper_bound=None,
+                 initialisation='uniform',
+                 log_movement=False,
                  seed: int | None = 0,
                  lr: float = 0.001,
                  device=None
@@ -26,7 +31,9 @@ class GA(nn.Module):
         self.obj_func = obj_func
         self.dim      = dim
         self.pop_size = pop_size
-        self.crossover = crossover 
+        self.crossover = crossover
+        self.mutation  = mutation
+        self.log_movement = log_movement
 
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,25 +46,49 @@ class GA(nn.Module):
         if upper_bound is None:
             upper_bound = [100.0] * dim
             
-        self.register_buffer("lb", torch.tensor(lower_bound, dtype=torch.float32))
-        self.register_buffer("ub", torch.tensor(upper_bound, dtype=torch.float32))
+        if self.log_movement:
+            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+        else:            
+            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
 
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-
-        genes = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+                    
+        if initialisation == "log" and self.log_movement==False:
+            genes = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim))
+        else:
+            genes = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+        
         self.genes = nn.Parameter(genes)
 
-        self.tau       = nn.Parameter(torch.tensor([init_sel_temp]))
+        self.tau_c     = nn.Parameter(torch.tensor([tau_c]))
+        self.tau_m     = nn.Parameter(torch.tensor([tau_m]))
         self.mut_scale = nn.Parameter(torch.tensor([init_mut_scale]))
         self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr))))
         
-        # SBX index  (learnable so the optimiser can anneal it)
-        self.eta_c      = nn.Parameter(torch.tensor([eta_c]))
+        if init_mr is None or init_mr == 0:
+            init_mr = 1.0 / dim  # sensible default
+        
+        logit_mr0 = torch.logit(torch.tensor(init_mr))
+        # self.mr_logit = nn.Parameter(logit_mr0.clone())
+        self.mr_logits = nn.Parameter(torch.full((dim,), logit_mr0))
+        
+        # Learnable so the optimiser can anneal them)
+        self.eta_c = nn.Parameter(torch.tensor([eta_c]))
+        self.eta_m = nn.Parameter(torch.tensor([eta_m]))
 
         with torch.no_grad():
-            f0 = obj_func(self.genes)
+            if log_movement:
+                x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.genes
+                x = 10**x
+                f0 = obj_func(x)
+            else:
+                f0 = obj_func(self.genes)
         
         self.fitnesses = f0.clone()
         self.fitnesses = self.fitnesses.to(self.device)
@@ -68,9 +99,13 @@ class GA(nn.Module):
         self.best_x = self.genes[g_idx].clone()
 
         self.optimizer = torch.optim.Adam([self.genes,
-                                           self.tau,
+                                           self.tau_c,
+                                           self.tau_m,
                                            self.mut_scale,
-                                           self.cr_logits],
+                                           self.cr_logits,
+                                           self.mr_logits,
+                                           self.eta_c,
+                                           self.eta_m],
                                           lr=lr)    
 
     # ---------------- Gumbel reparam => alpha => continuous mixture #
@@ -92,7 +127,6 @@ class GA(nn.Module):
         c1   = 0.5*((1+beta)*p1 + (1-beta)*p2)
         return c1
     
-     # UNDX -------------------------------------------------------------- #
     def _undx(self, p1, p2, p3):
         # Implements Minimal‐Normal UNDX (Takagi + Ono)
         base = 0.5*(p1 + p2)
@@ -106,11 +140,34 @@ class GA(nn.Module):
         eta  = torch.randn(self.dim, device=p1.device) * sigma_eta * norm
         child = base + xi*e_d + eta*perp/ (perp.norm()+1e-12)
         return child
+    
+    def _poly_mutate(self, x):
+        # Continuous polynomial mutation with Binary-Concrete mask.
+        D, dev = x.shape[0], x.device
+        eta = torch.clamp(self.eta_m, 1.0, 100.0)
+
+        # ----- Binary-Concrete mask -----------------------------------------
+        temp = torch.clamp(self.tau_c, 1e-3, 5.0)
+        u = torch.rand(D, device=dev)
+        s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.mr_logits) / temp)
+        mask = (s > 0.5).float() - s.detach() + s       # straight-through
+
+        # ----- polynomial perturbation -------------------------------------
+        u2 = torch.rand(D, device=dev)
+        mut_pow = 1.0 / (eta + 1.0)
+        delta = torch.where(
+            u2 < 0.5,
+            (2.0 * u2) ** mut_pow - 1.0,
+            1.0 - (2.0 * (1.0 - u2)) ** mut_pow
+        )
+
+        y = x + mask * delta * (self.ub[0] - self.lb[0])
+        return y
 
 
     def forward(self):
         N, D = self.pop_size, self.dim
-        temp = torch.clamp(self.tau, 1e-3, 5.0)
+        temp = torch.clamp(self.tau_c, 1e-3, 5.0)
 
         logp = -self.fitnesses / temp
                 
@@ -129,18 +186,27 @@ class GA(nn.Module):
                 child = self._undx(p1, p2, p3)           # UNDX
             else:                                        
                 child = cr * p1 + (1 - cr) * p2
-
-            child += mut * torch.randn(D, device=self.device)    # mutation
+            
+            if self.mutation == "pm":
+                child = self._poly_mutate(child)
+            else:
+                child += mut * torch.randn(D, device=self.device)    # Gaussian mutation
 
             # boundary bounce
             lo, hi = child < self.lb, child > self.ub
             child = torch.where(lo, 2*self.lb - child, child)
             child = torch.where(hi, 2*self.ub - child, child)
             
-            offspring.append(child.unsqueeze(0))
+            offspring.append(child)
         offspring = torch.cat(offspring, 0)
 
-        fit_offspring = self.obj_func(offspring)
+        if self.log_movement:
+            x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*offspring
+            x = 10**x
+            fit_offspring = self.obj_func(x)
+        else:
+            fit_offspring = self.obj_func(offspring)
+                
         self.n_evals += N
 
         best_old, idx_old = torch.min(self.fitnesses, 0)
