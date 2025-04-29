@@ -48,20 +48,26 @@ class CMAES(nn.Module):
             upper_bound = [100.0] * dim
             
         if self.log_movement:
-            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
-            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
-            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
-            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            self.register_buffer("lb", torch.tensor([0] * dim, device=self.device).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim, device=self.device).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound, device=self.device).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound, device=self.device).float().unsqueeze(0))
         else:            
-            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
-            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            self.register_buffer("lb", torch.tensor(lower_bound, device=self.device).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound, device=self.device).float().unsqueeze(0))
 
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
-
+            
+        
+        if initialisation is None:
+            initialisation = "uniform"
+        else:
+            initialisation = initialisation.lower()
+        
         # Mean parameter      
-        if initialisation == "log" and log_movement==False:
+        if initialisation in ["log", "logarithm"] and log_movement==False:
             init_m = 0.5 * (torch.log(self.lb) + torch.log(self.ub))
         else:
             init_m = 0.5 * (self.lb + self.ub)
@@ -69,10 +75,10 @@ class CMAES(nn.Module):
         self.m = nn.Parameter(init_m)
 
         # log‑sigma so that \sigma = exp(\sigma) is positive and differentiable
-        self.log_sigma = nn.Parameter(torch.tensor(math.log(init_sigma)))
+        self.log_sigma = nn.Parameter(torch.tensor(math.log(init_sigma), device=self.device))
 
         # Cholesky factor of C (normalised to det = 1 initially)
-        self.L_tri = nn.Parameter(torch.eye(dim, dtype=torch.float32))
+        self.L_tri = nn.Parameter(torch.eye(dim, dtype=torch.float32, device=self.device))
 
         # ---------------- Learnable hyperparameters -----------------------
         # They are in (0,1); we can store logits and map with sigmoid
@@ -81,28 +87,31 @@ class CMAES(nn.Module):
             x = min(max(x, eps), 1 - eps)
             return math.log(x / (1 - x))
 
-        self._raw_cc   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim)))
-        self._raw_cs   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim)))
-        self._raw_c1   = nn.Parameter(torch.tensor(_inv_sigmoid(2.0 / (dim**2))))
-        self._raw_cmu  = nn.Parameter(torch.tensor(_inv_sigmoid(0.4)))  # heuristic
-        self._raw_damp = nn.Parameter(torch.tensor(math.log(1.0 + 2.0)))
+        self._raw_cc   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim), device=self.device))
+        self._raw_cs   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim), device=self.device))
+        self._raw_c1   = nn.Parameter(torch.tensor(_inv_sigmoid(2.0 / (dim**2)), device=self.device))
+        self._raw_cmu  = nn.Parameter(torch.tensor(_inv_sigmoid(0.4), device=self.device))
+        self._raw_damp = nn.Parameter(torch.tensor(math.log(1.0 + 2.0), device=self.device))
 
         # ---------------- Evolution paths (buffers, not optimised with backpropagation) ------------
-        self.register_buffer("p_c", torch.zeros(dim))
-        self.register_buffer("p_sigma", torch.zeros(dim))
-        self.register_buffer("iter_idx", torch.tensor(0))
+        self.register_buffer("p_c", torch.zeros(dim, device=self.device))
+        self.register_buffer("p_sigma", torch.zeros(dim, device=self.device))
+        self.register_buffer("iter_idx", torch.tensor(0, device=self.device))
         
         with torch.no_grad():
             if self.log_movement:
                 x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.m
                 x = 10**x                
-                f0 = self.obj_func(x.squeeze(0))
+                f0 = self.obj_func(x)
             else:
-                f0 = self.obj_func(self.m.squeeze(0))
-                    
-        self.register_buffer("best_f", f0.clone())
-        self.register_buffer("best_x", self.m.clone().detach())
+                f0 = self.obj_func(self.m)
+        
+        idx_sorted = torch.argsort(f0)         
+        self.register_buffer("best_f", f0[idx_sorted[0]].clone())
+        self.register_buffer("best_x", self.m.squeeze(0).clone().detach())
         self.n_evals = 0
+        
+        self.pop = self.m.squeeze(0).clone().detach().repeat(pop_size, 1)
 
         # Adam optimiser for exploitation & hyperparameters learning
         self.optimizer = torch.optim.Adam([self.m,
@@ -148,11 +157,13 @@ class CMAES(nn.Module):
         x = self.m + self.sigma * y                              # phenotypes
 
         # (2) Boundary conditions
-        x = torch.max(torch.min(x, self.ub), self.lb)
+        # x = torch.max(torch.min(x, self.ub), self.lb)
+        # boundary bounce
+        mask_lo, mask_hi  = x < self.lb, x > self.ub
+        x = torch.where(mask_lo, 2*self.lb - x, x)
+        x = torch.where(mask_hi, 2*self.ub - x, x)
 
-        # (3) Fitness evaluation
-        # fitness = self.obj_func(x)
-        
+        # (3) Fitness evaluation        
         if self.log_movement:
             x_log = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*x
             x_log = 10**x_log
@@ -192,10 +203,18 @@ class CMAES(nn.Module):
         rank_mu = (w.view(-1, 1, 1) * y_sel.unsqueeze(-1) * y_sel.unsqueeze(-2)).sum(dim=0)
         C_new = (1 - c1 - c_mu) * C + c1 * torch.ger(p_c_new, p_c_new) + c_mu * rank_mu
 
-        # Mumerical safety for Cholesky decomposition
-        diag = torch.arange(D, device=self.device)
-        C_new[diag, diag] += 1e-7
-        L_new = torch.linalg.cholesky(C_new)
+        # Mumerical safety for Cholesky decomposition        
+        C_new = 0.5 * (C_new + C_new.T)  # enforce symmetry
+        eps = 1e-6 * torch.trace(C_new)
+        C_new.diagonal().add_(eps)  # adaptive jitter
+
+        try:
+            L_new = torch.linalg.cholesky(C_new)
+        except:  # not PD → eigen-fix
+            eigval, eigvec = torch.linalg.eigh(C_new)
+            eigval = torch.clamp(eigval, min=1e-12)
+            C_fix = (eigvec * eigval) @ eigvec.T
+            L_new = torch.linalg.cholesky(C_fix)
 
         # (7) step‑size update
         sigma_factor = torch.exp((cs / damps) * (norm_p_sigma / chi_n - 1.0))
@@ -205,10 +224,9 @@ class CMAES(nn.Module):
 
         best_val = fitness[idx_sorted[0]]
         best_x   = x[idx_sorted[0]].detach()
-
-        # Commit candidate results so the graph stays intact
-        # We do not detach everything remains differentiable
+                
         self._cand = {
+            "population":  x,
             "m":           m_new,
             "log_sigma":   torch.log(sigma_new),
             "L_tri":       L_new,
@@ -232,6 +250,8 @@ class CMAES(nn.Module):
     # --------------------------------------------------------------------- #
     @torch.no_grad()
     def update_state(self):
+        
+        self.pop.copy_(self._cand["population"])
         self.m.copy_(self._cand["m"])
         self.log_sigma.copy_(self._cand["log_sigma"])
         self.L_tri.copy_(self._cand["L_tri"])

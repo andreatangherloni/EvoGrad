@@ -47,48 +47,59 @@ class GA(nn.Module):
             upper_bound = [100.0] * dim
             
         if self.log_movement:
-            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
-            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
-            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
-            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            self.register_buffer("lb", torch.tensor([0] * dim, device=self.device).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim, device=self.device).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound, device=self.device).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound, device=self.device).float().unsqueeze(0))
         else:            
-            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
-            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            self.register_buffer("lb", torch.tensor(lower_bound, device=self.device).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound, device=self.device).float().unsqueeze(0))
 
         if seed is not None:
             torch.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
                     
-        if initialisation == "log" and self.log_movement==False:
-            genes = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim))
+        if initialisation is None:
+            initialisation = "uniform"
         else:
-            genes = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+            initialisation = initialisation.lower()
+             
+        if initialisation in ["log", "logarithm"] and log_movement==False:
+            pop0 = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim, device=self.device))
         
-        self.genes = nn.Parameter(genes)
+        elif initialisation in ["normal", "norm", "gaussian", "gauss"]:
+            mean = 0.5 * (self.lb + self.ub)          # centre of the box
+            std  = 0.5 * (self.ub - self.lb) / 3.0    # 3-σ rule  ⇒  99.7 % inside bounds
+            pop0 = mean + std * torch.randn(pop_size, dim, device=self.device)
+            pop0 = torch.max(torch.min(pop0, self.ub), self.lb)
+        else:
+            pop0 = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim, device=self.device)
+        
+        self.pop = nn.Parameter(pop0)
 
-        self.tau_c     = nn.Parameter(torch.tensor([tau_c]))
-        self.tau_m     = nn.Parameter(torch.tensor([tau_m]))
-        self.mut_scale = nn.Parameter(torch.tensor([init_mut_scale]))
-        self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr))))
+        self.tau_c     = nn.Parameter(torch.tensor([tau_c], device=self.device))
+        self.tau_m     = nn.Parameter(torch.tensor([tau_m], device=self.device))
+        self.mut_scale = nn.Parameter(torch.tensor([init_mut_scale], device=self.device))
+        self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr)), device=self.device))
         
         if init_mr is None or init_mr == 0:
             init_mr = 1.0 / dim  # sensible default
         
-        logit_mr0 = torch.logit(torch.tensor(init_mr))
+        logit_mr0 = torch.logit(torch.tensor(init_mr, device=self.device))
         # self.mr_logit = nn.Parameter(logit_mr0.clone())
-        self.mr_logits = nn.Parameter(torch.full((dim,), logit_mr0))
+        self.mr_logits = nn.Parameter(torch.full((dim,), logit_mr0, device=self.device))
         
         # Learnable so the optimiser can anneal them)
-        self.eta_c = nn.Parameter(torch.tensor([eta_c]))
-        self.eta_m = nn.Parameter(torch.tensor([eta_m]))
+        self.eta_c = nn.Parameter(torch.tensor([eta_c], device=self.device))
+        self.eta_m = nn.Parameter(torch.tensor([eta_m], device=self.device))
 
         with torch.no_grad():
             if log_movement:
-                x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.genes
+                x = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*self.pop
                 x = 10**x
                 f0 = obj_func(x)
             else:
-                f0 = obj_func(self.genes)
+                f0 = obj_func(self.pop)
         
         self.fitnesses = f0.clone()
         self.fitnesses = self.fitnesses.to(self.device)
@@ -96,9 +107,9 @@ class GA(nn.Module):
         
         g_idx = torch.argmin(self.fitnesses)
         self.best_f = self.fitnesses[g_idx].clone()
-        self.best_x = self.genes[g_idx].clone()
+        self.best_x = self.pop[g_idx].clone()
 
-        self.optimizer = torch.optim.Adam([self.genes,
+        self.optimizer = torch.optim.Adam([self.pop,
                                            self.tau_c,
                                            self.tau_m,
                                            self.mut_scale,
@@ -112,14 +123,14 @@ class GA(nn.Module):
     def _soft_parent(self, logp):
         g = -torch.log(-torch.log(torch.rand_like(logp, device=self.device) + 1e-8) + 1e-8)
         alpha = torch.softmax(logp + g, dim=0)
-        return (alpha.unsqueeze(1) * self.genes).sum(dim=0)
+        return (alpha.unsqueeze(1) * self.pop).sum(dim=0)
     
     def _sbx(self, p1, p2, cr):
         D = p1.shape[0]
         eta = torch.clamp(self.eta_c, 1.0, 100.0)
         # randomly decide which coords undergo SBX
-        mask = torch.rand(D, device=p1.device) < cr
-        u    = torch.rand(D, device=p1.device)
+        mask = torch.rand(D, device=self.device) < cr
+        u    = torch.rand(D, device=self.device)
         beta = torch.where(u <= 0.5,
                            (2*u)**(1/(eta+1)),
                            (2*(1-u))**(-1/(eta+1)))
@@ -136,24 +147,24 @@ class GA(nn.Module):
         perp = p3 - base
         perp = perp - (perp @ e_d) * e_d
         sigma_xi, sigma_eta = 0.5, 0.35 / sqrt(self.dim)
-        xi   = torch.randn(1, device=p1.device) * sigma_xi * norm
-        eta  = torch.randn(self.dim, device=p1.device) * sigma_eta * norm
+        xi   = torch.randn(1, device=self.device) * sigma_xi * norm
+        eta  = torch.randn(self.dim, device=self.device) * sigma_eta * norm
         child = base + xi*e_d + eta*perp/ (perp.norm()+1e-12)
         return child
     
     def _poly_mutate(self, x):
         # Continuous polynomial mutation with Binary-Concrete mask.
-        D, dev = x.shape[0], x.device
+        D = x.shape[0]
         eta = torch.clamp(self.eta_m, 1.0, 100.0)
 
         # ----- Binary-Concrete mask -----------------------------------------
         temp = torch.clamp(self.tau_c, 1e-3, 5.0)
-        u = torch.rand(D, device=dev)
+        u = torch.rand(D,device=self.device)
         s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.mr_logits) / temp)
         mask = (s > 0.5).float() - s.detach() + s       # straight-through
 
         # ----- polynomial perturbation -------------------------------------
-        u2 = torch.rand(D, device=dev)
+        u2 = torch.rand(D, device=self.device)
         mut_pow = 1.0 / (eta + 1.0)
         delta = torch.where(
             u2 < 0.5,
@@ -193,9 +204,9 @@ class GA(nn.Module):
                 child += mut * torch.randn(D, device=self.device)    # Gaussian mutation
 
             # boundary bounce
-            lo, hi = child < self.lb, child > self.ub
-            child = torch.where(lo, 2*self.lb - child, child)
-            child = torch.where(hi, 2*self.ub - child, child)
+            mask_lo, mask_hi  = child < self.lb, child > self.ub
+            child = torch.where(mask_lo, 2*self.lb - child, child)
+            child = torch.where(mask_hi, 2*self.ub - child, child)
             
             offspring.append(child)
         offspring = torch.cat(offspring, 0)
@@ -215,7 +226,7 @@ class GA(nn.Module):
         
         if best_old < best_kid:
             worst = torch.argmax(fit_offspring)
-            pop_new[worst] = self.genes[idx_old]
+            pop_new[worst] = self.pop[idx_old]
             fit_new[worst] = best_old
 
         best_val, best_idx = torch.min(fit_new, 0)
@@ -235,8 +246,8 @@ class GA(nn.Module):
     # --------------------------------------------------------------------- #
     @torch.no_grad()
     def update_state(self):
-        self.genes.copy_(self._cand["population"])
-        self.genes.requires_grad_(True)
+        self.pop.copy_(self._cand["population"])
+        self.pop.requires_grad_(True)
         self.fitnesses.copy_(self._cand["fitness"].detach())
 
         if self._cand["best_f"] < self.best_f:

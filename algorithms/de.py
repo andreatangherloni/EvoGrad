@@ -2,11 +2,6 @@ import torch
 import torch.nn as nn
 
 class DE(nn.Module):
-    """
-    Differential Evolution (rand/1‑bin flavour) with unified `_cand`.
-    """
-
-    # --------------------------------------------------------------------- #
         
     def __init__(self,
                 obj_func,
@@ -49,24 +44,35 @@ class DE(nn.Module):
             torch.cuda.manual_seed_all(seed)
         
         if self.log_movement:
-            self.register_buffer("lb", torch.tensor([0] * dim).float().unsqueeze(0))
-            self.register_buffer("ub", torch.tensor([1] * dim).float().unsqueeze(0))
-            self.register_buffer("actual_lb", torch.tensor(lower_bound).float().unsqueeze(0))
-            self.register_buffer("actual_ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            self.register_buffer("lb", torch.tensor([0] * dim, device=self.device).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor([1] * dim, device=self.device).float().unsqueeze(0))
+            self.register_buffer("actual_lb", torch.tensor(lower_bound, device=self.device).float().unsqueeze(0))
+            self.register_buffer("actual_ub", torch.tensor(upper_bound, device=self.device).float().unsqueeze(0))
         else:            
-            self.register_buffer("lb", torch.tensor(lower_bound).float().unsqueeze(0))
-            self.register_buffer("ub", torch.tensor(upper_bound).float().unsqueeze(0))
+            self.register_buffer("lb", torch.tensor(lower_bound, device=self.device).float().unsqueeze(0))
+            self.register_buffer("ub", torch.tensor(upper_bound, device=self.device).float().unsqueeze(0))
             
-        if initialisation == "log" and log_movement==False:
-            pop0 = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim))
+        if initialisation is None:
+            initialisation = "uniform"
         else:
-            pop0 = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim)
+            initialisation = initialisation.lower()
+             
+        if initialisation in ["log", "logarithm"] and log_movement==False:
+            pop0 = torch.exp(torch.log(self.lb) + torch.log(self.ub/self.lb)*torch.rand(pop_size, dim, device=self.device))
+        
+        elif initialisation in ["normal", "norm", "gaussian", "gauss"]:
+            mean = 0.5 * (self.lb + self.ub)          # centre of the box
+            std  = 0.5 * (self.ub - self.lb) / 3.0    # 3-σ rule  ⇒  99.7 % inside bounds
+            pop0 = mean + std * torch.randn(pop_size, dim, device=self.device)
+            pop0 = torch.max(torch.min(pop0, self.ub), self.lb)
+        else:
+            pop0 = self.lb + (self.ub - self.lb) * torch.rand(pop_size, dim, device=self.device)
         
         self.pop = nn.Parameter(pop0)
 
-        self.F         = nn.Parameter(torch.tensor([init_F]))
-        self.tau       = nn.Parameter(torch.tensor([init_tau]))
-        self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr))))
+        self.F         = nn.Parameter(torch.tensor([init_F], device=self.device))
+        self.tau       = nn.Parameter(torch.tensor([init_tau], device=self.device))
+        self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr)), device=self.device))
 
         with torch.no_grad():
             if log_movement:
@@ -126,9 +132,9 @@ class DE(nn.Module):
             child = torch.where(mask, v, x_i)
 
             # boundary bounce
-            lo, hi = child < self.lb, child > self.ub
-            child = torch.where(lo, 2*self.lb - child, child)
-            child = torch.where(hi, 2*self.ub - child, child)
+            mask_lo, mask_hi  = child < self.lb, child > self.ub
+            child = torch.where(mask_lo, 2*self.lb - child, child)
+            child = torch.where(mask_hi, 2*self.ub - child, child)
             
             offspring.append(child)
         
@@ -142,14 +148,6 @@ class DE(nn.Module):
             fit_offspring = self.obj_func(offspring)
         
         self.n_evals += N
-        
-        # best_old, idx_old = torch.min(self.fitnesses, 0)
-        # best_kid, _       = torch.min(fit_offspring, 0)
-        # pop_new, fit_new  = offspring.clone(), fit_offspring.clone()
-        # if best_old < best_kid:
-        #     worst = torch.argmax(fit_offspring)
-        #     pop_new[worst] = self.pop[idx_old]
-        #     fit_new[worst] = best_old
         
         # “one‑to‑one” replacement 
         better = fit_offspring < self.fitnesses          # vector of booleans, 1‑per‑parent
@@ -174,7 +172,8 @@ class DE(nn.Module):
     # --------------------------------------------------------------------- #
     @torch.no_grad()
     def update_state(self):
-        self.pop.copy_(self._cand["population"]); self.pop.requires_grad_(True)
+        self.pop.copy_(self._cand["population"])
+        self.pop.requires_grad_(True)
         self.fitnesses.copy_(self._cand["fitness"].detach())
 
         if self._cand["best_f"] < self.best_f:
