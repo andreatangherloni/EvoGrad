@@ -28,6 +28,10 @@ class GA(nn.Module):
         
         super().__init__()
         
+        self.history = {}
+        self.history["best_f"] = []
+        self.history["best_x"] = []
+        
         self.obj_func = obj_func
         self.dim      = dim
         self.pop_size = pop_size
@@ -108,6 +112,9 @@ class GA(nn.Module):
         g_idx = torch.argmin(self.fitnesses)
         self.best_f = self.fitnesses[g_idx].clone()
         self.best_x = self.pop[g_idx].clone()
+        
+        self.history["best_f"].append(self.best_f.clone().item())
+        self.history["best_x"].append(self.best_x.clone())
 
         self.optimizer = torch.optim.Adam([self.pop,
                                            self.tau_c,
@@ -174,6 +181,17 @@ class GA(nn.Module):
 
         y = x + mask * delta * (self.ub[0] - self.lb[0])
         return y
+    
+    def _reflect_bounds(self, x):
+        """
+        Reflect x into [lb, ub] even if |x-lb| > (ub-lb).
+        Supports tensors of any shape; lb/ub can be scalars or broadcastable.
+        """
+        span = self.ub - self.lb
+        # map to half-open interval (0, 2·span] then fold with |sin| pattern
+        x = (x - self.lb) % (2 * span)            # modulo 2·span
+        x = torch.where(x > span, 2*span - x, x)
+        return self.lb + x
 
 
     def forward(self):
@@ -204,9 +222,7 @@ class GA(nn.Module):
                 child += mut * torch.randn(D, device=self.device)    # Gaussian mutation
 
             # boundary bounce
-            mask_lo, mask_hi  = child < self.lb, child > self.ub
-            child = torch.where(mask_lo, 2*self.lb - child, child)
-            child = torch.where(mask_hi, 2*self.ub - child, child)
+            child = self._reflect_bounds(child)
             
             offspring.append(child)
         offspring = torch.cat(offspring, 0)
@@ -253,5 +269,6 @@ class GA(nn.Module):
         if self._cand["best_f"] < self.best_f:
             self.best_f.copy_(self._cand["best_f"].detach())
             self.best_x.copy_(self._cand["best_x"])
-
-        self.optimizer.zero_grad(set_to_none=True)
+        
+        self.history["best_f"].append(self.best_f.clone().item())
+        self.history["best_x"].append(self.best_x.clone())

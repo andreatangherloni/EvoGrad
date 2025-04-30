@@ -22,6 +22,10 @@ class DE(nn.Module):
     
         super().__init__()
         
+        self.history = {}
+        self.history["best_f"] = []
+        self.history["best_x"] = []
+        
         self.obj_func  = obj_func
         self.dim       = dim
         self.pop_size  = pop_size
@@ -92,6 +96,9 @@ class DE(nn.Module):
         self.best_f = self.best_f.to(self.device)
         self.best_x = self.best_x.to(self.device)
         
+        self.history["best_f"].append(self.best_f.clone().item())
+        self.history["best_x"].append(self.best_x.clone())
+        
         self.optimizer = torch.optim.Adam([self.pop,
                                            self.tau,
                                            self.F,
@@ -103,6 +110,17 @@ class DE(nn.Module):
         g = -torch.log(-torch.log(torch.rand_like(logp, device=self.device) + 1e-8) + 1e-8)
         alpha = torch.softmax(logp + g, dim=0)
         return (alpha.unsqueeze(1) * self.pop).sum(dim=0)
+    
+    def _reflect_bounds(self, x):
+        """
+        Reflect x into [lb, ub] even if |x-lb| > (ub-lb).
+        Supports tensors of any shape; lb/ub can be scalars or broadcastable.
+        """
+        span = self.ub - self.lb
+        # map to half-open interval (0, 2·span] then fold with |sin| pattern
+        x = (x - self.lb) % (2 * span)            # modulo 2·span
+        x = torch.where(x > span, 2*span - x, x)
+        return self.lb + x
 
     def forward(self):
         N, D = self.pop_size, self.dim
@@ -132,9 +150,7 @@ class DE(nn.Module):
             child = torch.where(mask, v, x_i)
 
             # boundary bounce
-            mask_lo, mask_hi  = child < self.lb, child > self.ub
-            child = torch.where(mask_lo, 2*self.lb - child, child)
-            child = torch.where(mask_hi, 2*self.ub - child, child)
+            child = self._reflect_bounds(child)
             
             offspring.append(child)
         
@@ -179,3 +195,6 @@ class DE(nn.Module):
         if self._cand["best_f"] < self.best_f:
             self.best_f.copy_(self._cand["best_f"].detach())
             self.best_x.copy_(self._cand["best_x"])
+        
+        self.history["best_f"].append(self.best_f.clone().item())
+        self.history["best_x"].append(self.best_x.clone())

@@ -23,6 +23,10 @@ class PSO(nn.Module):
     
         super().__init__()
         
+        self.history = {}
+        self.history["best_f"] = []
+        self.history["best_x"] = []
+        
         self.obj_func = obj_func
         self.dim      = dim
         self.pop_size = pop_size
@@ -92,6 +96,9 @@ class PSO(nn.Module):
         g_idx = torch.argmin(self.p_best_fit)
         self.best_f = self.p_best_fit[g_idx].clone()
         self.best_x = self.p_best_pos[g_idx].clone()
+        
+        self.history["best_f"].append(self.best_f.clone().item())
+        self.history["best_x"].append(self.best_x.clone())
 
         # learnable hyper‑parameters ----------------------------------------
         eye = torch.ones(pop_size, 1, device=self.device)
@@ -109,6 +116,17 @@ class PSO(nn.Module):
                                            self.v_max
                                            ],
                                           lr=lr) 
+    
+    def _reflect_bounds(self, x):
+        """
+        Reflect x into [lb, ub] even if |x-lb| > (ub-lb).
+        Supports tensors of any shape; lb/ub can be scalars or broadcastable.
+        """
+        span = self.ub - self.lb
+        # map to half-open interval (0, 2·span] then fold with |sin| pattern
+        x = (x - self.lb) % (2 * span)            # modulo 2·span
+        x = torch.where(x > span, 2*span - x, x)
+        return self.lb + x
 
     # --------------------------------------------------------------------- #
     def forward(self):
@@ -124,9 +142,7 @@ class PSO(nn.Module):
         
         pos_new = self.pop + vel_new
         mask_lo, mask_hi = pos_new < self.lb, pos_new > self.ub
-                
-        pos_new = torch.where(mask_lo, 2*self.lb - pos_new, pos_new)
-        pos_new = torch.where(mask_hi, 2*self.ub - pos_new, pos_new)
+        pos_new = self._reflect_bounds(pos_new)
         vel_new = torch.where(mask_lo | mask_hi, -vel_new, vel_new)
         
         if self.log_movement:
@@ -178,3 +194,6 @@ class PSO(nn.Module):
         if self._cand["best_f"] < self.best_f:
             self.best_f.copy_(self._cand["best_f"].detach())
             self.best_x.copy_(self._cand["best_x"])
+        
+        self.history["best_f"].append(self.best_f.clone().item())
+        self.history["best_x"].append(self.best_x.clone())
