@@ -10,14 +10,14 @@ class PSO(nn.Module):
                 init_inertia=0.7,
                 init_cognitive=1.4,
                 init_social=1.4,
-                init_v_min=-1,
-                init_v_max=1,
+                init_v_min=None,
+                init_v_max=None,
                 lower_bound=None,
                 upper_bound=None,
                 initialisation='uniform',
                 log_movement=False,
                 seed: int | None = 0,
-                lr: float = 0.001,
+                lr: float = 0.01,
                 device=None
                 ):
     
@@ -99,14 +99,30 @@ class PSO(nn.Module):
         
         self.history["best_f"].append(self.best_f.clone().item())
         self.history["best_x"].append(self.best_x.clone())
+        
+        eye = torch.ones(pop_size, 1, device=self.device)
+        
+        if init_v_max is None:
+            init_v_max = self.ub - self.lb
+            init_v_max = init_v_max.repeat(pop_size, 1)
+        
+        if init_v_min is None:
+            init_v_min = -(self.ub - self.lb)
+            init_v_min = init_v_min.repeat(pop_size, 1)
+        
+        if type(init_v_max) == float:
+            init_v_max = torch.full((pop_size, dim), torch.tensor(init_v_max), device=self.device)
+        
+        if type(init_v_min) == float:
+            init_v_min = torch.full((pop_size, dim), torch.tensor(init_v_min), device=self.device)
 
         # learnable hyper‑parameters ----------------------------------------
         eye = torch.ones(pop_size, 1, device=self.device)
         self.inertia   = nn.Parameter(init_inertia   * eye)
         self.cognitive = nn.Parameter(init_cognitive * eye)
         self.social    = nn.Parameter(init_social    * eye)
-        self.v_min     = nn.Parameter(init_v_min * eye)
-        self.v_max     = nn.Parameter(init_v_max * eye)
+        self.v_min     = nn.Parameter(init_v_min)
+        self.v_max     = nn.Parameter(init_v_max)
         
         self.optimizer = torch.optim.Adam([self.pop,
                                            self.inertia,

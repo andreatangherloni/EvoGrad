@@ -31,7 +31,7 @@ class CMAES(nn.Module):
                  initialisation='uniform',
                  log_movement=False,
                  seed: int | None = 0,
-                 lr: float = 0.001,
+                 lr: float = 0.01,
                  device=None
                  ):
         
