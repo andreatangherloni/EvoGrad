@@ -33,7 +33,13 @@ class DE(nn.Module):
         self.log_movement = log_movement
         
         if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            self.device = "cpu" 
+
+            if torch.backends.mps.is_available():
+                self.device = "mps"
+            elif torch.cuda.is_available():
+                self.device = "cuda" 
         else:
             self.device = device
 
