@@ -15,6 +15,7 @@ class GA(nn.Module):
                  init_mr=None,
                  crossover="sbx",      # "sbx", "undx", or "blend"
                  mutation="pm",
+                 elitism=True,
                  eta_c=15.0,
                  eta_m=20.0,
                  lower_bound=None,
@@ -38,6 +39,7 @@ class GA(nn.Module):
         self.crossover = crossover
         self.mutation  = mutation
         self.log_movement = log_movement
+        self.elitism = elitism
 
         if device is None:
             
@@ -96,7 +98,6 @@ class GA(nn.Module):
             init_mr = 1.0 / dim  # sensible default
         
         logit_mr0 = torch.logit(torch.tensor(init_mr, device=self.device))
-        # self.mr_logit = nn.Parameter(logit_mr0.clone())
         self.mr_logits = nn.Parameter(torch.full((dim,), logit_mr0, device=self.device))
         
         # Learnable so the optimiser can anneal them)
@@ -242,14 +243,16 @@ class GA(nn.Module):
                 
         self.n_evals += N
 
-        best_old, idx_old = torch.min(self.fitnesses, 0)
-        best_kid, _       = torch.min(fit_offspring, 0)
         pop_new, fit_new  = offspring.clone(), fit_offspring.clone()
         
-        if best_old < best_kid:
-            worst = torch.argmax(fit_offspring)
-            pop_new[worst] = self.pop[idx_old]
-            fit_new[worst] = best_old
+        if self.elitism:
+            best_old, idx_old = torch.min(self.fitnesses, 0)
+            best_kid, _       = torch.min(fit_offspring, 0)
+        
+            if best_old < best_kid:
+                worst = torch.argmax(fit_offspring)
+                pop_new[worst] = self.pop[idx_old]
+                fit_new[worst] = best_old
 
         best_val, best_idx = torch.min(fit_new, 0)
         self._cand = {

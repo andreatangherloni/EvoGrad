@@ -11,6 +11,7 @@ class DE(nn.Module):
                 init_F=2.,
                 init_cr=0.9,
                 mutation="rand/1",
+                elitism=False,
                 lower_bound=None,
                 upper_bound=None,
                 initialisation='uniform',
@@ -31,6 +32,7 @@ class DE(nn.Module):
         self.pop_size  = pop_size
         self.mutation  = mutation
         self.log_movement = log_movement
+        self.elitism = elitism
         
         if device is None:
             
@@ -173,8 +175,17 @@ class DE(nn.Module):
         
         # “one‑to‑one” replacement 
         better = fit_offspring < self.fitnesses          # vector of booleans, 1‑per‑parent
-        pop_new = torch.where(better.unsqueeze(1), offspring, self.pop)
-        fit_new = torch.where(better, fit_offspring, self.fitnesses)
+        pop_new = torch.where(better.unsqueeze(1), offspring.clone(), self.pop.clone())
+        fit_new = torch.where(better, fit_offspring.clone(), self.fitnesses.clone())
+        
+        if self.elitism:
+            best_old, idx_old = torch.min(self.fitnesses, 0)
+            best_kid, _       = torch.min(fit_offspring, 0)
+        
+            if best_old < best_kid:
+                worst = torch.argmax(fit_offspring)
+                pop_new[worst] = self.pop[idx_old]
+                fit_new[worst] = best_old
 
         best_val, best_idx = torch.min(fit_new, 0)
 
