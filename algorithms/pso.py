@@ -212,6 +212,10 @@ class PSO(nn.Module):
 
         self.p_best_pos.copy_(self._cand["p_best_pos"].detach())
         self.p_best_fit.copy_(self._cand["p_best_fit"].detach())
+        
+        self.cognitive.clamp_(min=1e-6)
+        self.social.clamp_(min=1e-6)
+        self.inertia.clamp_(min=1e-6)
 
         if self._cand["best_f"] < self.best_f:
             self.best_f.copy_(self._cand["best_f"].detach())

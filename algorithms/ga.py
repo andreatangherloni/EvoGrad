@@ -11,9 +11,9 @@ class GA(nn.Module):
                  tau_c=0.8,
                  tau_m=0.1,
                  init_mut_scale=0.1,
-                 init_cr=1.0,
+                 init_cr=0.9,
                  init_mr=None,
-                 crossover="sbx",      # "sbx", "undx", or "blend"
+                 crossover="sbx",      # "sbx", or "blend"
                  mutation="pm",
                  elitism=True,
                  eta_c=15.0,
@@ -92,7 +92,9 @@ class GA(nn.Module):
         self.tau_c     = nn.Parameter(torch.tensor([tau_c], device=self.device))
         self.tau_m     = nn.Parameter(torch.tensor([tau_m], device=self.device))
         self.mut_scale = nn.Parameter(torch.tensor([init_mut_scale], device=self.device))
-        self.cr_logits = nn.Parameter(torch.full((dim,), torch.logit(torch.tensor(init_cr)), device=self.device))
+        
+        logit_cr0 = torch.logit(torch.tensor(init_cr, device=self.device))
+        self.cr_logits = nn.Parameter(torch.full((dim,), logit_cr0, device=self.device))
         
         if init_mr is None or init_mr == 0:
             init_mr = 1.0 / dim  # sensible default
@@ -138,42 +140,35 @@ class GA(nn.Module):
         g = -torch.log(-torch.log(torch.rand_like(logp, device=self.device) + 1e-8) + 1e-8)
         alpha = torch.softmax(logp + g, dim=0)
         return (alpha.unsqueeze(1) * self.pop).sum(dim=0)
-    
+        
     def _sbx(self, p1, p2, cr):
-        D = p1.shape[0]
-        eta = torch.clamp(self.eta_c, 1.0, 100.0)
-        # randomly decide which coords undergo SBX
-        mask = torch.rand(D, device=self.device) < cr
-        u    = torch.rand(D, device=self.device)
-        beta = torch.where(u <= 0.5,
-                           (2*u)**(1/(eta+1)),
-                           (2*(1-u))**(-1/(eta+1)))
-        beta = torch.where(mask, beta, torch.ones_like(beta))
-        c1   = 0.5*((1+beta)*p1 + (1-beta)*p2)
-        return c1
-    
-    def _undx(self, p1, p2, p3):
-        # Implements Minimal‐Normal UNDX (Takagi + Ono)
-        base = 0.5*(p1 + p2)
-        d    = p2 - p1
-        norm = d.norm()
-        e_d  = d / (norm + 1e-12)
-        perp = p3 - base
-        perp = perp - (perp @ e_d) * e_d
-        sigma_xi, sigma_eta = 0.5, 0.35 / sqrt(self.dim)
-        xi   = torch.randn(1, device=self.device) * sigma_xi * norm
-        eta  = torch.randn(self.dim, device=self.device) * sigma_eta * norm
-        child = base + xi*e_d + eta*perp/ (perp.norm()+1e-12)
+        D   = p1.shape[0]
+        eta = self.eta_c
+
+        # ----- Binary-Concrete mask --------------------------
+        temp = self.tau_c
+        u = torch.rand(D, device=self.device)
+        s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.cr_logits) / temp)
+        mask = (s > 0.5).float() - s.detach() + s       # straight-through
+
+        # ----- SBX coefficients --------------------------------------------
+        u2    = torch.rand(D, device=self.device)
+        beta  = torch.where(u2 <= 0.5,
+                            (2*u2)**(1/(eta+1)),
+                            (2*(1-u2))**(-1/(eta+1)))
+
+        beta  = mask * beta + (1.0 - mask)             # 1.0 means “no crossover”
+        child = 0.5 * ((1 + beta) * p1 + (1 - beta) * p2)
         return child
-    
+        
     def _poly_mutate(self, x):
         # Continuous polynomial mutation with Binary-Concrete mask.
         D = x.shape[0]
-        eta = torch.clamp(self.eta_m, 1.0, 100.0)
+        eta = self.eta_m
 
         # ----- Binary-Concrete mask -----------------------------------------
-        temp = torch.clamp(self.tau_c, 1e-3, 5.0)
-        u = torch.rand(D,device=self.device)
+        temp = self.tau_m
+        u = torch.rand(D, device=self.device)
         s = torch.sigmoid((torch.log(u) - torch.log(1 - u) + self.mr_logits) / temp)
         mask = (s > 0.5).float() - s.detach() + s       # straight-through
 
@@ -203,12 +198,12 @@ class GA(nn.Module):
 
     def forward(self):
         N, D = self.pop_size, self.dim
-        temp = torch.clamp(self.tau_c, 1e-3, 5.0)
+        temp = self.tau_c
 
         logp = -self.fitnesses / temp
                 
         cr   = torch.sigmoid(self.cr_logits)
-        mut  = torch.clamp(self.mut_scale, 1e-5, 10.0)
+        mut  = self.mut_scale
 
         # Crossover and mutation
         offspring = []
@@ -274,7 +269,13 @@ class GA(nn.Module):
         self.pop.copy_(self._cand["population"])
         self.pop.requires_grad_(True)
         self.fitnesses.copy_(self._cand["fitness"].detach())
-
+        
+        self.mut_scale.clamp_(1e-5, 10.0)
+        self.tau_c.clamp_(min=1e-5, max=5.0)   
+        self.tau_m.clamp_(min=1e-5, max=5.0)   
+        self.eta_m.clamp_(min=0.1,  max=100.0)  
+        self.eta_c.clamp_(min=0.1,  max=100.0)
+     
         if self._cand["best_f"] < self.best_f:
             self.best_f.copy_(self._cand["best_f"].detach())
             self.best_x.copy_(self._cand["best_x"])

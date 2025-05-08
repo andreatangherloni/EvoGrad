@@ -119,6 +119,23 @@ class DE(nn.Module):
         alpha = torch.softmax(logp + g, dim=0)
         return (alpha.unsqueeze(1) * self.pop).sum(dim=0)
     
+    def _binomial_crossover(self, x, v):
+        D = x.shape[0]
+
+        # ----- Binary-Concrete mask --------------------------
+        temp = self.tau
+        u = torch.rand(D, device=self.device)
+        s = torch.sigmoid((torch.log(u) - torch.log1p(-u) + self.cr_logits) / temp)
+        mask = (s > 0.5).float() - s.detach() + s       # straight-through
+        
+        # guarantee at least one donor gene (j_rand)
+        j_rand = torch.randint(0, D, (), device=self.device)
+        mask[j_rand] = 1.0                             # hard 1, still allows grad
+
+        # Mix parent and donor with a *soft* mask -----------------------
+        child = mask * v + (1.0 - mask) * x
+        return child
+    
     def _reflect_bounds(self, x):
         """
         Reflect x into [lb, ub] even if |x-lb| > (ub-lb).
@@ -132,9 +149,9 @@ class DE(nn.Module):
 
     def forward(self):
         N, D = self.pop_size, self.dim
-        temp = torch.clamp(self.tau, 1e-3, 5.0)
+        temp = self.tau
         logp = -self.fitnesses / temp
-        F    = torch.clamp(self.F, 1e-8, 2.0)
+        F    = self.F
         cr   = torch.sigmoid(self.cr_logits)
         
         # Offspring generation
@@ -151,11 +168,8 @@ class DE(nn.Module):
             else:  # rand/1
                 r1, r2, r3 = (self._soft_parent(logp) for _ in range(3))
                 v = r1 + F*(r2 - r3)
-                
-            mask = torch.rand(D, device=self.device) < cr
-            j_rand = torch.randint(0, D, (1,), device=self.device)   # ensure ≥1 donor gene
-            mask[j_rand] = True 
-            child = torch.where(mask, v, x_i)
+                        
+            child = self._binomial_crossover(x_i, v)
 
             # boundary bounce
             child = self._reflect_bounds(child)
@@ -208,6 +222,9 @@ class DE(nn.Module):
         self.pop.copy_(self._cand["population"])
         self.pop.requires_grad_(True)
         self.fitnesses.copy_(self._cand["fitness"].detach())
+        
+        self.F.clamp_(min=1e-8, max=2.0)
+        self.tau.clamp_(min=1e-5, max=5)
 
         if self._cand["best_f"] < self.best_f:
             self.best_f.copy_(self._cand["best_f"].detach())
