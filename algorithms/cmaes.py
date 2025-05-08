@@ -111,13 +111,15 @@ class CMAES(nn.Module):
         def _inv_sigmoid(x):
             x = min(max(x, self.eps), 1 - self.eps)
             return math.log(x / (1 - x))
+        
+        # ---------------- Optimised with backpropagation just once ------------
+        self.raw_cc   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim), device=self.device))
+        self.raw_cs   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim), device=self.device))
+        self.raw_c1   = nn.Parameter(torch.tensor(_inv_sigmoid(2.0 / (dim**2)), device=self.device))
+        self.raw_cmu  = nn.Parameter(torch.tensor(_inv_sigmoid(0.4), device=self.device))
+        self.raw_damp = nn.Parameter(torch.tensor(math.log(1.0 + 2.0), device=self.device))
 
         # ---------------- Not optimised with backpropagation) ------------
-        self.register_buffer("raw_cc",   torch.tensor((4.0 / dim), device=self.device))
-        self.register_buffer("raw_cs",   torch.tensor((4.0 / dim), device=self.device))
-        self.register_buffer("raw_c1",   torch.tensor((2.0 / dim**2), device=self.device))
-        self.register_buffer("raw_cmu",  torch.tensor((0.4), device=self.device))
-        self.register_buffer("raw_damp", torch.tensor(math.log(1.0 + 2.0), device=self.device))
         self.register_buffer("p_c",      torch.zeros(dim, device=self.device))
         self.register_buffer("p_sigma",  torch.zeros(dim, device=self.device))
         self.register_buffer("iter_idx", torch.tensor(0, device=self.device))
@@ -143,7 +145,12 @@ class CMAES(nn.Module):
         # Adam optimiser for exploitation & hyperparameters learning
         self.optimizer = torch.optim.Adam([self.m,
                                            self.log_sigma,
-                                           self.L_tri
+                                           self.L_tri,
+                                           self.raw_cc,
+                                           self.raw_cs,
+                                           self.raw_c1,
+                                           self.raw_cmu,
+                                           self.raw_damp
                                            ],
                                           lr=lr)
 
