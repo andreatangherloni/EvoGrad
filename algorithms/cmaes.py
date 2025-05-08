@@ -26,6 +26,7 @@ class CMAES(nn.Module):
                  dim: int,
                  pop_size: int = 30,
                  init_sigma: float = 0.5,
+                 elitism=False,
                  lower_bound=None,
                  upper_bound=None,
                  initialisation='uniform',
@@ -48,6 +49,7 @@ class CMAES(nn.Module):
         self.log_movement = log_movement
         self.eps = 1e-14 * (dim ** 7)
         self.eps = float(min(self.eps, 1e-1))
+        self.elitism = elitism
                 
         self.fitnesses = torch.full((pop_size,), torch.finfo(torch.float32).max)
         
@@ -104,21 +106,20 @@ class CMAES(nn.Module):
         # Cholesky factor of C (normalised to det = 1 initially)
         self.L_tri = nn.Parameter(torch.eye(dim, dtype=torch.float32, device=self.device))
 
-        # ---------------- Learnable hyperparameters -----------------------
+        # ---------------- Needed if when learnable hyperparameters -----------------------
         # They are in (0,1); we can store logits and map with sigmoid
         def _inv_sigmoid(x):
             x = min(max(x, self.eps), 1 - self.eps)
             return math.log(x / (1 - x))
 
-        self._raw_cc   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim), device=self.device))
-        self._raw_cs   = nn.Parameter(torch.tensor(_inv_sigmoid(4.0 / dim), device=self.device))
-        self._raw_c1   = nn.Parameter(torch.tensor(_inv_sigmoid(2.0 / (dim**2)), device=self.device))
-        self._raw_cmu  = nn.Parameter(torch.tensor(_inv_sigmoid(0.4), device=self.device))
-        self._raw_damp = nn.Parameter(torch.tensor(math.log(1.0 + 2.0), device=self.device))
-
-        # ---------------- Evolution paths (buffers, not optimised with backpropagation) ------------
-        self.register_buffer("p_c", torch.zeros(dim, device=self.device))
-        self.register_buffer("p_sigma", torch.zeros(dim, device=self.device))
+        # ---------------- Not optimised with backpropagation) ------------
+        self.register_buffer("raw_cc",   torch.tensor((4.0 / dim), device=self.device))
+        self.register_buffer("raw_cs",   torch.tensor((4.0 / dim), device=self.device))
+        self.register_buffer("raw_c1",   torch.tensor((2.0 / dim**2), device=self.device))
+        self.register_buffer("raw_cmu",  torch.tensor((0.4), device=self.device))
+        self.register_buffer("raw_damp", torch.tensor(math.log(1.0 + 2.0), device=self.device))
+        self.register_buffer("p_c",      torch.zeros(dim, device=self.device))
+        self.register_buffer("p_sigma",  torch.zeros(dim, device=self.device))
         self.register_buffer("iter_idx", torch.tensor(0, device=self.device))
         
         with torch.no_grad():
@@ -142,27 +143,22 @@ class CMAES(nn.Module):
         # Adam optimiser for exploitation & hyperparameters learning
         self.optimizer = torch.optim.Adam([self.m,
                                            self.log_sigma,
-                                           self.L_tri,
-                                           self._raw_cc,
-                                           self._raw_cs,
-                                           self._raw_c1,
-                                           self._raw_cmu,
-                                           self._raw_damp
+                                           self.L_tri
                                            ],
                                           lr=lr)
 
     def _decode_coeffs(self):
         """Decode sigmoids & clamp to obey c1 + c_mu ≤ 1"""
-        cc  = torch.sigmoid(self._raw_cc)
-        cs  = torch.sigmoid(self._raw_cs)
-        c1  = torch.sigmoid(self._raw_c1)
-        cmu = torch.sigmoid(self._raw_cmu)
+        cc  = torch.sigmoid(self.raw_cc)
+        cs  = torch.sigmoid(self.raw_cs)
+        c1  = torch.sigmoid(self.raw_c1)
+        cmu = torch.sigmoid(self.raw_cmu)
 
         total = (c1 + cmu).item() 
         if total > 0.999: # softly rescale to keep valid
             c1 = c1 / total * 0.999
             cmu = cmu / total * 0.999
-        damps = self._raw_damp.exp()
+        damps = self.raw_damp.exp()
         return cc, cs, c1, cmu, damps
     
     def _reflect_bounds(self, x):
@@ -194,25 +190,30 @@ class CMAES(nn.Module):
         z = torch.randn(N, D, device=self.device)                   # ~ N(0,I)
         y = (L @ z.T).T                                          # shape [N,D]
         self.sigma = self.log_sigma.exp()
-        x = self.m + self.sigma * y                              # phenotypes
+        x_offspring = self.m + self.sigma * y                              # phenotypes
         
-        # (2) Boundary conditions
-        # x = torch.max(torch.min(x, self.ub), self.lb)
-        # boundary bounce
-        x = self._reflect_bounds(x)
+        # (2) Boundary conditions (boundary bounce)
+        x_offspring = self._reflect_bounds(x_offspring)
         
         # (3) Fitness evaluation        
         if self.log_movement:
-            x_log = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*x
+            x_log = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*x_offspring
             x_log = 10**x_log
-            fitness = self.obj_func(x_log)
+            fit_offspring = self.obj_func(x_log)
         else:
-            fitness = self.obj_func(x)
+            fit_offspring = self.obj_func(x_offspring)
         
         self.n_evals += N
+        
+        x, fit_new  = x_offspring.clone(), fit_offspring.clone()
+                
+        if self.elitism:
+            worst_idx = torch.argmax(fit_offspring)
+            x[worst_idx]       = self.best_x 
+            fit_new[worst_idx] = self.best_f
 
         # (4) Sort and parent weights
-        idx_sorted = torch.argsort(fitness)                     
+        idx_sorted = torch.argsort(fit_new)                     
         idx_sel = idx_sorted[:mu]
         y_sel = y[idx_sel] # parents in y‑space
         
@@ -259,7 +260,7 @@ class CMAES(nn.Module):
 
         m_new = self.m + self.sigma * y_w
 
-        best_val = fitness[idx_sorted[0]]
+        best_val = fit_new[idx_sorted[0]]
         best_x   = x[idx_sorted[0]].detach()
                 
         self._cand = {
@@ -269,7 +270,7 @@ class CMAES(nn.Module):
             "L_tri":       L_new,
             "p_c":         p_c_new,
             "p_sigma":     p_sigma_new,
-            "fitness":     fitness,
+            "fitness":     fit_new,
             "best_f":      best_val,
             "best_x":      best_x,
             
