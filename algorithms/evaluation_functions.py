@@ -22,16 +22,23 @@ def evaluate(algorithm,
              pop_size = 100,
              max_evals=1000,
              n_runs = 30, 
+             seed=None,
              device = None,
              verbose = True,
              save_path=None):
     
     best_fitnesses = []
-    histories = []
+    histories = []    
 
     for i in range(n_runs):
+        
+        if n_runs == 1 and seed is not None:
+            run_seed = seed
+        else:
+            run_seed = i
+        
         alg = algorithm(function, dim=dim, pop_size=pop_size, lower_bound=lower_bound, 
-                        upper_bound=upper_bound, seed=i, device=device)
+                        upper_bound=upper_bound, seed=run_seed, device=device)
         
         min_diff(alg, max_evals=max_evals, verbose=verbose)
 
@@ -87,7 +94,8 @@ def evaluate_pso(function,
                  upper_bound = 100,
                  pop_size = 100,
                  max_evals=1000,
-                 n_runs = 30, 
+                 n_runs = 30,
+                 seed=None,
                  verbose = True,
                  save_path=None):
     
@@ -95,6 +103,11 @@ def evaluate_pso(function,
     histories = []
 
     for i in range(n_runs):
+        
+        if n_runs == 1 and seed is not None:
+            run_seed = seed
+        else:
+            run_seed = i
         
         problem = TorchProblemWrapper(function,
                                       dim=dim, 
@@ -105,15 +118,14 @@ def evaluate_pso(function,
         def callback(alg):
             run_history.append(alg.opt.get("F").min())
         
-        
         algorithm = PSO_pymoo(pop_size=pop_size,
                               sampling=FloatRandomSampling(),
-                              seed=i)
+                              seed=run_seed)
 
         res = minimize(problem,
                        algorithm,
                        ('n_evals', max_evals),
-                       seed=i,
+                       seed=run_seed,
                        verbose=False,
                        callback=callback)
         
@@ -140,7 +152,6 @@ def evaluate_pso(function,
 
     return best_fitnesses_np
 
-
 def evaluate_ga(function,
                 dim = 100,
                 lower_bound = -100, 
@@ -148,6 +159,7 @@ def evaluate_ga(function,
                 pop_size = 100,
                 max_evals=1000,
                 n_runs = 30, 
+                seed=None,
                 verbose = True,
                 save_path=None):
     
@@ -155,6 +167,11 @@ def evaluate_ga(function,
     histories = []
 
     for i in range(n_runs):
+        
+        if n_runs == 1 and seed is not None:
+            run_seed = seed
+        else:
+            run_seed = i
         
         problem = TorchProblemWrapper(function,
                                       dim=dim, 
@@ -164,19 +181,18 @@ def evaluate_ga(function,
         run_history = []
         def callback(alg):
             run_history.append(alg.opt.get("F").min())
-        
-        
+            
         algorithm = GA_pymoo(pop_size=pop_size,
                              sampling=FloatRandomSampling(),
                              crossover=SBX(prob=0.9, eta=15),
                              mutation=PM(eta=20),
                              eliminate_duplicates=True,
-                             seed=i)
+                             seed=run_seed)
 
         res = minimize(problem,
                        algorithm,
                        ('n_evals', max_evals),
-                       seed=i,
+                       seed=run_seed,
                        verbose=False,
                        callback=callback)
         
@@ -210,6 +226,7 @@ def evaluate_de(function,
                 pop_size = 100,
                 max_evals=1000,
                 n_runs = 30, 
+                seed=None,
                 verbose = True,
                 save_path=None):
     
@@ -217,6 +234,11 @@ def evaluate_de(function,
     histories = []
 
     for i in range(n_runs):
+        
+        if n_runs == 1 and seed is not None:
+            run_seed = seed
+        else:
+            run_seed = i
         
         problem = TorchProblemWrapper(function,
                                       dim=dim, 
@@ -234,13 +256,13 @@ def evaluate_de(function,
                              CR=0.9,
                              dither="vector",
                              jitter=False,
-                             seed=i
+                             seed=run_seed
                              )
 
         res = minimize(problem,
                        algorithm,
                        ('n_evals', max_evals),
-                       seed=i,
+                       seed=run_seed,
                        verbose=False,
                        callback=callback)
         
@@ -276,6 +298,7 @@ def evaluate_cmaes(function,
                    x0=None,
                    max_evals=1000,
                    n_runs = 30, 
+                   seed=None,
                    verbose = True,
                    save_path=None):
     
@@ -293,6 +316,11 @@ def evaluate_cmaes(function,
 
     for i in range(n_runs):
         
+        if n_runs == 1 and seed is not None:
+            run_seed = seed
+        else:
+            run_seed = i
+        
         problem = TorchProblemWrapper(function,
                                       dim=dim, 
                                       lower_bound=lower_bound, 
@@ -303,14 +331,11 @@ def evaluate_cmaes(function,
             run_history.append(alg.opt.get("F").min())
         
         algorithm = algorithm = CMAES_pymoo(pop_size=pop_size,
-                                            # x0=x0,
-                                            # sigma=sigma,
-                                            seed=i)
-
+                                            seed=run_seed)
         res = minimize(problem,
                        algorithm,
                        ('n_evals', max_evals),
-                       seed=i,
+                       seed=run_seed,
                        verbose=verbose,
                        callback=callback)
         

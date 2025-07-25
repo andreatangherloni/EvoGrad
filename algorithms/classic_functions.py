@@ -11,7 +11,7 @@ import torch
 # else:
 #     device = device
 
-def Ackley(x, a=20, b=0.2, c=2 * torch.pi):
+def ackley(x, a=20, b=0.2, c=2 * torch.pi):
     # x = x.to(device)
 
     d = x.size(1)
@@ -23,7 +23,7 @@ def Ackley(x, a=20, b=0.2, c=2 * torch.pi):
 
     return term1 + term2 + a + torch.exp(torch.tensor(1.0, device=x.device))
 
-def Mishra01(x):
+def mishra01(x):
     # x = x.to(device)
     d = x.size(1)
     x_n = d - torch.sum(x[:, :-1], dim=-1)
@@ -33,7 +33,7 @@ def Mishra01(x):
 
     return torch.clamp(output, max=1e6) 
 
-def Quintic(x):
+def quintic(x):
     # x = x.to(device)
 
     poly = x**5 + 3*x**4 + 4*x**3 + 2*x**2 - 10*x - 4
@@ -44,7 +44,7 @@ def Quintic(x):
     else:
         return torch.sum(out, dim=-1)  
     
-def Michalewicz(x, M = 10.0):
+def michalewicz(x, M = 10.0):
     # x = x.to(device)
     if x.ndim == 1:
         x = x.unsqueeze(0) 
@@ -59,7 +59,7 @@ def Michalewicz(x, M = 10.0):
     return fitness
     # return fitness if fitness.shape[0] > 1 else fitness[0]
 
-def Schubert(x):
+def schubert(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
@@ -72,27 +72,27 @@ def Schubert(x):
     prod = torch.prod(summed, dim=-1)        
     return prod
 
-def Alpine(x):
+def alpine(x):
 
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
     return torch.sum(torch.abs(x * torch.sin(x) + 0.1 * x), dim=-1)
 
-def Bohachevsky(x):
+def bohachevsky(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
     terms = x[ :, :-1]**2 + 2*x[:,1:]**2 - 0.3*torch.cos(3*torch.pi*x[:,:-1]) - 0.4*torch.cos(4*torch.pi*x[:,1:]) + 0.7
     return torch.sum(terms, dim=-1)
 
-def Plateau(x):
+def plateau(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
     return 30.0 + torch.sum(torch.floor(x), dim=-1)
 
-def XinSheYang(x):
+def xinSheYang(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
@@ -101,7 +101,7 @@ def XinSheYang(x):
     denom = torch.exp(expo)
     return numer / denom
 
-def Vincent(x):
+def vincent(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
@@ -112,14 +112,14 @@ def Vincent(x):
     d = x.size(1)     
     return (1.0 / d) * torch.sum(torch.sin(10 * torch.log(x)), dim=-1)
 
-def Vincent2(x):
+def vincent2(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
     x = torch.clamp(x, min=0.25, max=10.0)
     return torch.sum(torch.sin(10 * torch.log(x)), dim=-1 if x.dim() == 2 else 0)
 
-def Griewank(x):
+def griewank(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
@@ -130,7 +130,7 @@ def Griewank(x):
     prod_term = torch.prod(torch.cos(x / torch.sqrt(i_tensor)), dim=-1)
     return 1.0 + sum_term - prod_term
 
-def Rastrigin(x):
+def rastrigin(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
@@ -139,14 +139,14 @@ def Rastrigin(x):
     
     return A * d + torch.sum(x**2 - A * torch.cos(2 * torch.pi * x), dim=-1)
 
-def Schwefel(x):
+def schwefel(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
     d = x.size(1)
     return 418.9829 * d - torch.sum(x * torch.sin(torch.sqrt(torch.abs(x))), dim=-1)
 
-def Rosenbrock(x):
+def rosenbrock(x):
     # x = x.to(device)
     if x.dim() == 1:
         x = x.unsqueeze(0)
