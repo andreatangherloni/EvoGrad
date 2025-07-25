@@ -63,4 +63,5 @@ def minimize(algorithm,
         
         generation +=1   
     
-    print(f"best_f = {algorithm.best_f.item():.4f}")
+    if verbose:
+        print(f"best_f = {algorithm.best_f.item():.4f}")

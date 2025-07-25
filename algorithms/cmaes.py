@@ -5,7 +5,6 @@ import torch.nn as nn
 def _expected_norm(dim: int) -> float:
     """
     E||N(0, I)||  (accurate to O(1/dim))
-    Ref: Hansen 2013 tutorial
     """
     d = float(dim)
     return math.sqrt(d) * (1.0 - 1. / (4 * d) + 1. / (21 * d * d))
@@ -45,7 +44,7 @@ class CMAES(nn.Module):
         self.obj_func = obj_func
         self.dim      = dim
         self.pop_size = pop_size
-        self.mu       = pop_size // 2  # number of selected parents
+        self.mu       = pop_size // 2
         self.log_movement = log_movement
         self.eps = 1e-14 * (dim ** 7)
         self.eps = float(min(self.eps, 1e-1))
@@ -64,7 +63,7 @@ class CMAES(nn.Module):
         else:
             self.device = device
 
-        # ---------------- Initial search volume ----------------
+        # Set the boundaries of the search space
         if lower_bound is None:
             lower_bound = [-100.0] * dim
         if upper_bound is None:
@@ -106,7 +105,7 @@ class CMAES(nn.Module):
         # Cholesky factor of C (normalised to det = 1 initially)
         self.L_tri = nn.Parameter(torch.eye(dim, dtype=torch.float32, device=self.device))
 
-        # ---------------- Needed if when learnable hyperparameters -----------------------
+        # ---------------- Needed when learnable hyperparameters -----------------------
         # They are in (0,1); we can store logits and map with sigmoid
         def _inv_sigmoid(x):
             x = min(max(x, self.eps), 1 - self.eps)
@@ -168,22 +167,15 @@ class CMAES(nn.Module):
         damps = self.raw_damp.exp()
         return cc, cs, c1, cmu, damps
     
+    # Boundary bounce
     def _reflect_bounds(self, x):
-        """
-        Reflect x into [lb, ub] even if |x-lb| > (ub-lb).
-        Supports tensors of any shape; lb/ub can be scalars or broadcastable.
-        """
         span = self.ub - self.lb
-        # map to half-open interval (0, 2·span] then fold with |sin| pattern
         x = (x - self.lb) % (2 * span)            # modulo 2·span
         x = torch.where(x > span, 2*span - x, x)
         return self.lb + x
 
-    # -------------------------------------------------------------------------
-    # Main differentiable evolutionary generation
-    # -------------------------------------------------------------------------
+    # Forward pass
     def forward(self):
-        """Run one CMAES generation and return the scalar best fitness of that generation"""
         N, D, mu = self.pop_size, self.dim, self.mu
         cc, cs, c1, c_mu, damps = self._decode_coeffs()
 
@@ -193,16 +185,16 @@ class CMAES(nn.Module):
         min_abs_L = torch.abs(L).masked_select(L != 0).min().item()
         self.eps = _heuristic_eps(min_abs_L)
 
-        # (1) sampling (re‑parameterisation semantics) 
-        z = torch.randn(N, D, device=self.device)                   # ~ N(0,I)
-        y = (L @ z.T).T                                          # shape [N,D]
+        # 1. Sampling (re‑parameterisation semantics) 
+        z = torch.randn(N, D, device=self.device) # ~ N(0,I)
+        y = (L @ z.T).T                           # [N,D]
         self.sigma = self.log_sigma.exp()
-        x_offspring = self.m + self.sigma * y                              # phenotypes
+        x_offspring = self.m + self.sigma * y  # phenotypes
         
-        # (2) Boundary conditions (boundary bounce)
+        # 2. Keep inside bounds (reflect)
         x_offspring = self._reflect_bounds(x_offspring)
         
-        # (3) Fitness evaluation        
+        # 3. Fitness evaluation
         if self.log_movement:
             x_log = torch.log10(self.actual_ub) + (torch.log10(self.actual_lb) - torch.log10(self.actual_ub))*x_offspring
             x_log = 10**x_log
@@ -213,13 +205,14 @@ class CMAES(nn.Module):
         self.n_evals += N
         
         x, fit_new  = x_offspring.clone(), fit_offspring.clone()
-                
+        
+        # 4. Elitism
         if self.elitism:
             worst_idx = torch.argmax(fit_offspring)
             x[worst_idx]       = self.best_x 
             fit_new[worst_idx] = self.best_f
 
-        # (4) Sort and parent weights
+        # 5. Sort and parent weights
         idx_sorted = torch.argsort(fit_new)                     
         idx_sel = idx_sorted[:mu]
         y_sel = y[idx_sel] # parents in y‑space
@@ -232,24 +225,24 @@ class CMAES(nn.Module):
 
         y_w = torch.sum(w.view(-1, 1) * y_sel, dim=0) # weighted mean
 
-        # (5) Evolution paths     
+        # 6. Evolution paths     
         z_w = torch.linalg.solve_triangular(L, y_w.unsqueeze(-1), upper=False ).squeeze(-1)
         
         p_sigma_new = (1 - cs) * self.p_sigma + torch.sqrt(cs * (2 - cs) * mu_eff) * z_w
 
-        # heuristic h_σ  (smoothed hard threshold)
+        # 7. heuristic h_σ  (smoothed hard threshold)
         chi_n = _expected_norm(D)
         norm_p_sigma = p_sigma_new.norm()
         h_sigma = torch.sigmoid(10 * (1.4 + 2.0 / (D + 1) - norm_p_sigma / chi_n))
 
         p_c_new = (1 - cc) * self.p_c + h_sigma * torch.sqrt(cc * (2 - cc) * mu_eff) * y_w
 
-        # (6) Covariance update
+        # 8. Covariance update
         C = L @ L.T
         rank_mu = (w.view(-1, 1, 1) * y_sel.unsqueeze(-1) * y_sel.unsqueeze(-2)).sum(dim=0)
         C_new = (1 - c1 - c_mu) * C + c1 * torch.ger(p_c_new, p_c_new) + c_mu * rank_mu
         
-        # Mumerical safety for Cholesky decomposition     
+        # 9. Mumerical safety for Cholesky decomposition     
         diag = torch.arange(D, device=self.device)
         C_new[diag, diag] += self.eps
 
@@ -261,7 +254,7 @@ class CMAES(nn.Module):
             C_fix = (eigvec * eigval) @ eigvec.T
             L_new = torch.linalg.cholesky(C_fix)
 
-        # (7) step‑size update
+        # 10. step‑size update
         sigma_factor = torch.exp((cs / damps) * (norm_p_sigma / chi_n - 1.0))
         sigma_new = self.sigma * sigma_factor
 
@@ -292,7 +285,7 @@ class CMAES(nn.Module):
         }
         return best_val
     
-    # --------------------------------------------------------------------- #
+    # Update the params
     @torch.no_grad()
     def update_state(self):
         
