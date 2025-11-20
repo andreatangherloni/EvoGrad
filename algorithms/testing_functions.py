@@ -11,20 +11,10 @@ with open(os.path.join(_THIS_DIR, "data.pkl"), "rb") as fh:
 
 _ROTS = {}
 for d in (2, 10, 20, 30, 50, 100):
-    arr = _raw[f"M_D{d}"]
-    if arr.ndim == 3:
-        # if there are multiple rotation matrices stacked; take the first one
-        arr = arr[0]
-    elif arr.ndim > 2:
-        # flatten arbitrary higher dims, keep only the first block of size (d,d)
-        arr = arr.reshape(-1)
-        arr = arr[: d * d].reshape(d, d)
-    elif arr.ndim == 1 and arr.size > d * d:
-        # 1D flattened list of many matrices
-        arr = arr[: d * d].reshape(d, d)
-    elif arr.ndim != 2:
-        raise ValueError(f"Cannot interpret rotation data for D={d}, shape {arr.shape}")
-    _ROTS[d] = torch.from_numpy(arr).float()
+    arr = np.asarray(_raw[f"M_D{d}"], dtype=np.float64) 
+    if arr.ndim != 3 or arr.shape[1:] != (d, d):
+        raise ValueError(f"Unexpected shape for M_D{d}: {arr.shape}, expected (20,{d},{d})")
+    _ROTS[d] = torch.from_numpy(arr).float() 
 
 _SHIFTS = torch.from_numpy(_raw["shift"]).float()
 
@@ -43,28 +33,30 @@ def _pairwise_adjacent(x: torch.Tensor):
     """return (x_i, x_{i+1}) for i=1..D-1 (no wrap-around)."""
     return x[..., :-1], x[..., 1:]
 
-def _get_rot(D: int, *, device, dtype):
-    """return a (D,D) rotation matrix from _ROTS[D]."""
-    R = _ROTS.get(D, None)
-    if R is None:
+def _get_rot(D: int, *, device, dtype, func_id: int):
+    """Return a (D,D) rotation matrix corresponding to `func_id` (1..20)."""
+    Rstack = _ROTS.get(D, None)  
+    if Rstack is None:
         return None
-    R = R.to(device=device, dtype=dtype)
-    if R.ndim != 2:
-        R = R.reshape(D, D)
-    return R
+    idx = func_id - 1
+    if not (0 <= idx < Rstack.shape[0]):
+        raise IndexError(f"func_id {func_id} out of range for rotations of D={D}")
+    R = Rstack[idx]  # (D, D)
+    return R.to(device=device, dtype=dtype)
 
 def apply_shift_rot(f_basic, func_id: int, D: int = 2):
     """
-    transform: z = (x - o) @ R^T   (row-vector convention)
+    transform: z = (x - o) @ R^T  
     """
     def f(x: torch.Tensor) -> torch.Tensor:
         shift = _SHIFTS[func_id - 1, :D].to(device=x.device, dtype=x.dtype)  
-        z = x - shift                                                        
-        R = _get_rot(D, device=x.device, dtype=x.dtype)
+        z = x - shift
+        R = _get_rot(D, device=x.device, dtype=x.dtype, func_id=func_id)     
         if R is not None:
-            z = torch.matmul(z, R.transpose(-1, -2))                        
+            z = torch.matmul(z, R.transpose(-1, -2))
         return f_basic(z)
     return f
+
 
 # ------------------------------------------------------------------
 
