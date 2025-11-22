@@ -58,6 +58,7 @@ def apply_shift_rot(f_basic, func_id: int, D: int = 2):
     return f
 
 
+
 # ------------------------------------------------------------------
 
 def _zakharov(z):
@@ -254,15 +255,15 @@ if __name__ == "__main__":
     D = 2  
     for f_basic, name in base_funcs:
         func_id = FUNC_IDS[name]
-        f_trans = apply_shift_rot(f_basic, func_id=func_id, D=D)
+        # f_trans = apply_shift_rot(f_basic, func_id=func_id, D=D)
 
-        fname = name.replace(" ", "_").replace("+", "plus").replace("/", "_") + "_sr"
-        path  = f"plots/{fname}.png"
+        fname = name.replace(" ", "_").replace("+", "plus").replace("/", "_") 
+        path  = f"basic_functions_plots_{RES}/{fname}.png"
         try:
-            print(f"Plotting {name} (shift+rot) → {path}")
+            print(f"Plotting {name} → {path}")
             plot_function_2d(
-                f_trans,
-                f"{name} (shift+rot)",
+                f_basic,
+                f"{name}",
                 bounds=BOUNDS,
                 res=RES,
                 save_path=path
