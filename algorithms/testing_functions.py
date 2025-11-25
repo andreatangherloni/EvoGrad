@@ -70,7 +70,9 @@ def _rosenbrock(z):
     return torch.sum(100*(z[..., :-1]**2 - z[..., 1:])**2 + (z[..., :-1] - 1)**2, dim=-1)
 
 def _rastrigin(z):
-    return torch.sum(z**2 - 10*torch.cos(2*math.pi*z) + 10, dim=-1)
+    D = z.shape[-1]
+    return torch.sum(z**2 - 10 * torch.cos(2 * np.pi * z) + 10, dim=-1)
+
 
 def _levy(z):
     w  = 1 + (z - 1)/4
@@ -146,22 +148,6 @@ def _mod_schwefel(z):
 
     return 418.9829*D - torch.sum(out, dim=-1)
 
-def _katsuura(z):
-    D = z.shape[-1]
-    i = torch.arange(1, D+1, device=z.device, dtype=z.dtype).view(*(1,)* (z.ndim-1), D)
-    j = torch.arange(1, 33, device=z.device, dtype=z.dtype).view(*(1,)*z.ndim, 32)
-    pow2j = torch.pow(torch.tensor(2.0, dtype=z.dtype, device=z.device), j)
-
-    z_exp = z.unsqueeze(-1) 
-    frac = torch.abs(pow2j * z_exp - torch.round(pow2j * z_exp)) / pow2j   
-    inner_sum = torch.sum(frac, dim=-1)  
-
-    base = 1.0 + i * inner_sum
-    power = 10.0 / (D**1.2)
-    prod_term = torch.prod(torch.pow(base, power), dim=-1)
-
-    return (10.0 / (D**2)) * (prod_term - 1.0)
-
 def _schaffers_f7(z):
     xi, xnext = _pairwise_adjacent(z)
     s = torch.sqrt(xi**2 + xnext**2)
@@ -210,8 +196,26 @@ def plot_function_2d(f, name, bounds=(-5, 5), res=200, device='cpu', log_scale=F
 if __name__ == "__main__":
     os.makedirs("shifted_rotated_plots", exist_ok=True)
 
-    BOUNDS = (-100.0, 100.0)
-    RES    = 200
+    # Function-specific bounds for proper visualization
+    FUNCTION_BOUNDS = {
+        "Zakharov": (-5, 10),
+        "Rosenbrock": (-5, 10),
+        "Expanded Schaffer F6": (-100, 100),
+        "Rastrigin": (-5.12, 5.12),
+        "Levy": (-10, 10),
+        "Bent Cigar": (-100, 100),
+        "HGBat": (-5, 5),
+        "High-Conditioned Elliptic": (-100, 100),
+        "HappyCat": (-5, 5),
+        "Expanded Rosenbrock + Griewank": (-5, 5),
+        "Modified Schwefel": (-500, 500),
+        "Ackley": (-32.768, 32.768),
+        "Discus": (-100, 100),
+        "Griewank": (-600, 600),
+        "Schaffer F7": (-100, 100),
+    }
+
+    RES = 1000
 
     # map each function to its CEC row index in _SHIFTS
     FUNC_IDS = {
@@ -223,14 +227,13 @@ if __name__ == "__main__":
         "Bent Cigar":                        6,
         "HGBat":                             7,
         "High-Conditioned Elliptic":         8,
-        "Katsuura":                          9,
-        "HappyCat":                          10,
-        "Expanded Rosenbrock + Griewank":    11,
-        "Modified Schwefel":                 12,
-        "Ackley":                            13,
-        "Discus":                            14,
-        "Griewank":                          15,
-        "Schaffer F7":                       16,
+        "HappyCat":                          9,
+        "Expanded Rosenbrock + Griewank":    10,
+        "Modified Schwefel":                 11,
+        "Ackley":                            12,
+        "Discus":                            13,
+        "Griewank":                          14,
+        "Schaffer F7":                       15,
     }
 
     base_funcs = [
@@ -242,7 +245,6 @@ if __name__ == "__main__":
         (_bent_cigar,            "Bent Cigar"),
         (_hg_bat,                "HGBat"),
         (_elliptic,              "High-Conditioned Elliptic"),
-        (_katsuura,              "Katsuura"),
         (_happy_cat,             "HappyCat"),
         (_exp_rosen_griewank,    "Expanded Rosenbrock + Griewank"),
         (_mod_schwefel,          "Modified Schwefel"),
@@ -257,14 +259,16 @@ if __name__ == "__main__":
         func_id = FUNC_IDS[name]
         # f_trans = apply_shift_rot(f_basic, func_id=func_id, D=D)
 
+        bounds = FUNCTION_BOUNDS.get(name, (-100, 100))  # default fallback to (100,100)
+
         fname = name.replace(" ", "_").replace("+", "plus").replace("/", "_") 
         path  = f"basic_functions_plots_{RES}/{fname}.png"
         try:
-            print(f"Plotting {name} → {path}")
+            print(f"Plotting {name} with bounds {bounds} → {path}")
             plot_function_2d(
                 f_basic,
                 f"{name}",
-                bounds=BOUNDS,
+                bounds=bounds,
                 res=RES,
                 save_path=path
             )
