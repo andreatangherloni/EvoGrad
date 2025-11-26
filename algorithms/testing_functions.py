@@ -22,6 +22,27 @@ _SHUFFLES = {
     d: torch.from_numpy(_raw[f"shuffle_D{d}"].astype("int64"))
     for d in (10, 30, 50, 100)
 }
+FUNC_IDS = {
+        "Zakharov":                          1,
+        "Rosenbrock":                        2,
+        "Expanded Schaffer F6":              3,
+        "Rastrigin":                         4,
+        "Levy":                              5,
+        "Bent Cigar":                        6,
+        "HGBat":                             7,
+        "High-Conditioned Elliptic":         8,
+        "HappyCat":                          9,
+        "Expanded Rosenbrock + Griewank":    10,
+        "Modified Schwefel":                 11,
+        "Ackley":                            12,
+        "Discus":                            13,
+        "Griewank":                          14,
+        "Schaffer F7":                       15,
+    }
+
+    
+
+
 
 # ------------------------------------------------------------------
 
@@ -156,7 +177,7 @@ def _schaffers_f7(z):
 
 # ------------------------------------------------------------------
 
-def plot_function_2d(f, name, bounds=(-5, 5), res=200, device='cpu', log_scale=False, save_path=None):
+def plot_function_2d(f, name, bounds=(-100, 100), res=200, device='cpu', log_scale=False, save_path=None):
     """ plots contour + 3D surface """
     x = torch.linspace(bounds[0], bounds[1], res)
     y = torch.linspace(bounds[0], bounds[1], res)
@@ -191,52 +212,7 @@ def plot_function_2d(f, name, bounds=(-5, 5), res=200, device='cpu', log_scale=F
     else:
         plt.show()
 
-# ------------------------------------------------------------------
-
-if __name__ == "__main__":
-    os.makedirs("shifted_rotated_plots", exist_ok=True)
-
-    # Function-specific bounds for proper visualization
-    FUNCTION_BOUNDS = {
-        "Zakharov": (-5, 10),
-        "Rosenbrock": (-5, 10),
-        "Expanded Schaffer F6": (-100, 100),
-        "Rastrigin": (-5.12, 5.12),
-        "Levy": (-10, 10),
-        "Bent Cigar": (-100, 100),
-        "HGBat": (-5, 5),
-        "High-Conditioned Elliptic": (-100, 100),
-        "HappyCat": (-5, 5),
-        "Expanded Rosenbrock + Griewank": (-5, 5),
-        "Modified Schwefel": (-500, 500),
-        "Ackley": (-32.768, 32.768),
-        "Discus": (-100, 100),
-        "Griewank": (-600, 600),
-        "Schaffer F7": (-100, 100),
-    }
-
-    RES = 1000
-
-    # map each function to its CEC row index in _SHIFTS
-    FUNC_IDS = {
-        "Zakharov":                          1,
-        "Rosenbrock":                        2,
-        "Expanded Schaffer F6":              3,
-        "Rastrigin":                         4,
-        "Levy":                              5,
-        "Bent Cigar":                        6,
-        "HGBat":                             7,
-        "High-Conditioned Elliptic":         8,
-        "HappyCat":                          9,
-        "Expanded Rosenbrock + Griewank":    10,
-        "Modified Schwefel":                 11,
-        "Ackley":                            12,
-        "Discus":                            13,
-        "Griewank":                          14,
-        "Schaffer F7":                       15,
-    }
-
-    base_funcs = [
+base_funcs = [
         (_zakharov,              "Zakharov"),
         (_rosenbrock,            "Rosenbrock"),
         (_exp_schaffer_f6,       "Expanded Schaffer F6"),
@@ -254,23 +230,40 @@ if __name__ == "__main__":
         (_schaffers_f7,          "Schaffer F7"),
     ]
 
+# ------------------------------------------------------------------
+
+if __name__ == "__main__":
+    RES = 1000
+
+    bounds = (-100,100)
+
     D = 2  
     for f_basic, name in base_funcs:
         func_id = FUNC_IDS[name]
-        # f_trans = apply_shift_rot(f_basic, func_id=func_id, D=D)
-
-        bounds = FUNCTION_BOUNDS.get(name, (-100, 100))  # default fallback to (100,100)
+        f_trans = apply_shift_rot(f_basic, func_id=func_id, D=D)
 
         fname = name.replace(" ", "_").replace("+", "plus").replace("/", "_") 
+        fname_sr = name.replace(" ", "_").replace("+", "plus").replace("/", "_") + '_sr'
+
+
         path  = f"basic_functions_plots_{RES}/{fname}.png"
+        path_rot  = f"shifted_rotated_plots_{RES}/{fname_sr}.png"
+
         try:
-            print(f"Plotting {name} with bounds {bounds} → {path}")
+            print(f"Plotting {name} with bounds {bounds}")
             plot_function_2d(
                 f_basic,
                 f"{name}",
                 bounds=bounds,
                 res=RES,
                 save_path=path
+            )
+            plot_function_2d(
+                f_trans,
+                f"{fname_sr}",
+                bounds=bounds,
+                res=RES,
+                save_path=path_rot
             )
         except Exception as e:
             print(f"[WARN] Skipped {name}: {e}")
