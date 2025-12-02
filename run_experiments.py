@@ -79,15 +79,17 @@ def evaluate_baseline(algorithm, function, dim, lower_bound, upper_bound,
 
 if __name__ == "__main__":
 
+
     D          = 30
     pop_size   = 100
     max_evals  = 10000
-    n_runs     = 10
+    n_runs     = 30
 
     lower_bound = [-100.0] * D
     upper_bound = [100.0] * D
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
     algo_defs = [
         ("PSO_diff",   PSO, True),         
