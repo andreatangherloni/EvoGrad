@@ -20,10 +20,6 @@ def _make_torch_objective(
     func: Callable[[torch.Tensor], torch.Tensor],
     device: str = "cpu",
 ) -> Callable[[np.ndarray], float]:
-    """
-    Wraps a vectorised PyTorch objective f: [N,D] -> [N] into a scalar function
-    f_np: [D] -> float suitable for external libraries.
-    """
     def objective(x: np.ndarray) -> float:
         x_np = np.asarray(x, dtype=np.float32).reshape(1, -1)
         x_t = torch.tensor(x_np, dtype=torch.float32, device=device)

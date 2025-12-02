@@ -47,15 +47,12 @@ FUNC_IDS = {
 # ------------------------------------------------------------------
 
 def _pairwise_cyclic(x: torch.Tensor):
-    """return (x_i, x_{i+1}) with wrap-around on the last dim."""
     return x, torch.roll(x, shifts=-1, dims=-1)
 
 def _pairwise_adjacent(x: torch.Tensor):
-    """return (x_i, x_{i+1}) for i=1..D-1 (no wrap-around)."""
     return x[..., :-1], x[..., 1:]
 
 def _get_rot(D: int, *, device, dtype, func_id: int):
-    """Return a (D,D) rotation matrix corresponding to `func_id` (1..20)."""
     Rstack = _ROTS.get(D, None)  
     if Rstack is None:
         return None
@@ -66,9 +63,6 @@ def _get_rot(D: int, *, device, dtype, func_id: int):
     return R.to(device=device, dtype=dtype)
 
 def apply_shift_rot(f_basic, func_id: int, D: int = 2):
-    """
-    transform: z = (x - o) @ R^T  
-    """
     def f(x: torch.Tensor) -> torch.Tensor:
         shift = _SHIFTS[func_id - 1, :D].to(device=x.device, dtype=x.dtype)  
         z = x - shift
@@ -178,7 +172,6 @@ def _schaffers_f7(z):
 # ------------------------------------------------------------------
 
 def plot_function_2d(f, name, bounds=(-100, 100), res=200, device='cpu', log_scale=False, save_path=None):
-    """ plots contour + 3D surface """
     x = torch.linspace(bounds[0], bounds[1], res)
     y = torch.linspace(bounds[0], bounds[1], res)
     X, Y = torch.meshgrid(x, y, indexing='ij')
