@@ -7,26 +7,17 @@ differentiable operation.
 
 Available Algorithms:
     - GA: Genetic Algorithm with SBX crossover and polynomial mutation
-    - DE: Differential Evolution with multiple mutation/crossover variants
-    - PSO: Particle Swarm Optimisation with adaptive coefficients
+    - DE: Differential Evolution with multiple mutation strategies
+    - SHADE: Success-History based Adaptive DE
+    - LSHADE: SHADE with Linear Population Size Reduction
+    - PSO: Particle Swarm Optimisation
     - CMAES: Covariance Matrix Adaptation Evolution Strategy
 
 All algorithms inherit from the base Algorithm class and follow
 the dependency injection pattern for operators.
 
-Modes:
-    Each algorithm supports four operating modes controlled by two flags:
-    
-    - adaptive=False, differentiable=False: Classical algorithm
-    - adaptive=True, differentiable=False: Operators/hyperparameters are
-        differentiable and learned via backpropagation
-    - adaptive=False, differentiable=True: Population is differentiable
-        and learned via backpropagation
-    - adaptive=True, differentiable=True: Both operators/hyperparameters
-        and population are differentiable
-
 Example:
-    >>> from evograd.algorithms import GA, DE, PSO, CMAES
+    >>> from evograd.algorithms import GA, DE, SHADE, PSO, CMAES
     >>> from evograd.core import Problem, minimize
     >>> 
     >>> problem = Problem(
@@ -40,20 +31,31 @@ Example:
     >>> ga = GA(pop_size=100, differentiable=True)
     >>> result = minimize(problem, ga, max_evals=10000)
     >>> 
-    >>> # Differential Evolution with adaptive hyperparameters
+    >>> # Differential Evolution
     >>> de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
     >>> result = minimize(problem, de, max_evals=10000)
     >>> 
+    >>> # SHADE (Self-Adaptive DE)
+    >>> shade = SHADE(pop_size=100, memory_size=100)
+    >>> result = minimize(problem, shade, max_evals=10000)
+    >>> 
+    >>> # L-SHADE (SHADE with population reduction)
+    >>> lshade = LSHADE(pop_size_init=18*30, pop_size_min=4)
+    >>> result = minimize(problem, lshade, max_evals=10000)
+    >>> 
     >>> # Particle Swarm Optimisation
-    >>> pso = PSO(pop_size=100, adaptive=True, differentiable=True)
+    >>> pso = PSO(pop_size=100, adaptive=True)
     >>> result = minimize(problem, pso, max_evals=10000)
     >>> 
-    >>> # CMA-ES with learnable adaptation coefficients
-    >>> cmaes = CMAES(sigma=0.5, adaptive=True)
+    >>> # CMA-ES
+    >>> cmaes = CMAES(pop_size=50, adaptive=True)
     >>> result = minimize(problem, cmaes, max_evals=10000)
 """
 
+# Genetic Algorithm
 from evograd.algorithms.ga import GA, ga_default, ga_steady_state, ga_comma
+
+# Differential Evolution
 from evograd.algorithms.de import (
     DE,
     DEVariant,
@@ -61,18 +63,37 @@ from evograd.algorithms.de import (
     de_best_1_bin,
     de_current_to_best_1_bin,
 )
+
+# SHADE and L-SHADE
+from evograd.algorithms.shade import (
+    SHADE,
+    LSHADE,
+    SHADEMemory,
+    shade_default,
+    shade_adaptive,
+    lshade_default,
+    lshade_adaptive,
+)
+
+# Particle Swarm Optimisation
 from evograd.algorithms.pso import (
     PSO,
     pso_default,
     pso_constriction,
     pso_adaptive,
 )
+
+# CMA-ES
 from evograd.algorithms.cmaes import (
     CMAES,
+    RestartRegime,
+    RestartState,
     cmaes_default,
     cmaes_small,
     cmaes_large,
     cmaes_adaptive,
+    cmaes_ipop,
+    cmaes_bipop,
 )
 
 __all__ = [
@@ -81,21 +102,37 @@ __all__ = [
     "ga_default",
     "ga_steady_state",
     "ga_comma",
+    
     # Differential Evolution
     "DE",
     "DEVariant",
     "de_rand_1_bin",
     "de_best_1_bin",
     "de_current_to_best_1_bin",
+    
+    # SHADE and L-SHADE
+    "SHADE",
+    "LSHADE",
+    "SHADEMemory",
+    "shade_default",
+    "shade_adaptive",
+    "lshade_default",
+    "lshade_adaptive",
+    
     # Particle Swarm Optimisation
     "PSO",
     "pso_default",
     "pso_constriction",
     "pso_adaptive",
+    
     # CMA-ES
     "CMAES",
+    "RestartRegime",
+    "RestartState",
     "cmaes_default",
     "cmaes_small",
     "cmaes_large",
     "cmaes_adaptive",
+    "cmaes_ipop",
+    "cmaes_bipop",
 ]
