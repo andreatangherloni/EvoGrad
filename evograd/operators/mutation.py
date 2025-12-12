@@ -11,11 +11,33 @@ Available mutations:
     - UniformMutation: Uniform random perturbation
     - NonUniformMutation: Decreasing perturbation over time
     - BoundaryMutation: Reset genes to boundary values
+    - NoMutation: Identity (no mutation)
+    - CombinedMutation: Chain multiple mutations
 
 Differentiable Mode:
     When `differentiable=True`, mutation masks use Binary-Concrete
     (Gumbel-Sigmoid) relaxation, and perturbations use the
     reparameterisation trick for gradient flow.
+
+Per-Individual/Per-Gene Parameters:
+    All mutation operators support four parameter configurations via
+    optional runtime overrides in forward(). This is essential for
+    self-adaptive algorithms like SHADE, jDE, or self-adaptive GAs.
+    
+    Configurations:
+        - Fixed (scalar): Same value for all individuals and genes
+        - Per-gene [D]: Different value per gene, same across individuals
+        - Per-individual [N]: Different value per individual, same across genes
+        - Per-gene + Per-individual [N, D]: Full matrix, different for each
+    
+    Example:
+        >>> # SHADE-style per-individual sigma/F
+        >>> sigma_per_ind = torch.rand(pop_size) * 0.5  # [N]
+        >>> mutated = mutation(population, xl, xu, sigma=sigma_per_ind)
+        >>> 
+        >>> # Per-gene mutation probability
+        >>> prob_per_gene = torch.rand(n_var) * 0.2  # [D]
+        >>> mutated = mutation(population, xl, xu, prob=prob_per_gene)
 
 Example:
     >>> from evograd.operators import PolynomialMutation
@@ -37,11 +59,16 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Union
+from typing import TYPE_CHECKING, List, Optional, Union
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+from evograd.operators.relaxations import binary_concrete, expand_param
+
+if TYPE_CHECKING:
+    from evograd.core.problem import Problem
 
 __all__ = [
     "Mutation",
@@ -51,6 +78,7 @@ __all__ = [
     "NonUniformMutation",
     "BoundaryMutation",
     "NoMutation",
+    "CombinedMutation",
 ]
 
 
@@ -72,6 +100,18 @@ class Mutation(nn.Module, ABC):
         learn_temperature: If True, temperature is learnable.
         learn_prob: If True, mutation probability is learnable.
         n_var: Number of variables (for per-gene probability).
+    
+    Per-Individual/Per-Gene Parameters:
+        The forward() method accepts optional parameter overrides that
+        support four configurations:
+        
+        - scalar: Fixed value for all individuals and genes
+        - [D] tensor: Per-gene values (same across individuals)
+        - [N] tensor: Per-individual values (same across genes)
+        - [N, D] tensor: Full matrix (different for each individual and gene)
+        
+        When an override is provided, it takes precedence over the stored
+        parameter. This enables self-adaptive algorithms like SHADE.
     """
     
     def __init__(
@@ -147,13 +187,12 @@ class Mutation(nn.Module, ABC):
     def _get_prob(self, n_var: int, device: torch.device) -> Tensor:
         """Get mutation probability, computing default if needed."""
         if self.prob_logits is not None:
-            logits = self.prob_logits.to(device)
-            if logits.dim() == 0:
-                return torch.sigmoid(logits).expand(n_var)
-            return torch.sigmoid(logits)
-        else:
-            # Default: 1/n_var
-            return torch.full((n_var,), 1.0 / n_var, device=device)
+            prob = torch.sigmoid(self.prob_logits.to(device))
+            if prob.dim() == 0:
+                return prob.expand(n_var)
+            return prob
+        # Default: 1/n_var
+        return torch.full((n_var,), 1.0 / n_var, device=device)
     
     def _get_prob_logits(self, n_var: int, device: torch.device) -> Tensor:
         """Get probability logits, computing default if needed."""
@@ -162,43 +201,13 @@ class Mutation(nn.Module, ABC):
             if logits.dim() == 0:
                 return logits.expand(n_var)
             return logits
-        else:
-            # Default: 1/n_var
-            default_prob = 1.0 / n_var
-            return torch.full(
-                (n_var,),
-                self._prob_to_logit(default_prob),
-                device=device
-            )
-    
-    def _binary_concrete(
-        self,
-        logits: Tensor,
-        hard: bool = True,
-        eps: float = 1e-10,
-    ) -> Tensor:
-        """
-        Binary-Concrete (Gumbel-Sigmoid) with straight-through.
-        
-        Args:
-            logits: Unnormalised log-odds.
-            hard: If True, use straight-through estimator.
-            eps: Small constant for numerical stability.
-        
-        Returns:
-            Soft or hard binary mask.
-        """
-        u = torch.rand_like(logits)
-        u = torch.clamp(u, eps, 1.0 - eps)
-        
-        noise = torch.log(u) - torch.log(1 - u)
-        y_soft = torch.sigmoid((logits + noise) / self.temperature)
-        
-        if hard:
-            y_hard = (y_soft > 0.5).float()
-            return (y_hard - y_soft).detach() + y_soft
-        
-        return y_soft
+        # Default: 1/n_var
+        default_prob = 1.0 / n_var
+        return torch.full(
+            (n_var,),
+            self._prob_to_logit(default_prob),
+            device=device
+        )
     
     @abstractmethod
     def _mutate(
@@ -206,6 +215,7 @@ class Mutation(nn.Module, ABC):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        **kwargs,
     ) -> Tensor:
         """
         Apply mutation to individuals.
@@ -214,6 +224,7 @@ class Mutation(nn.Module, ABC):
             x: Individuals to mutate [n_pop, n_var].
             xl: Lower bounds [n_var] or scalar.
             xu: Upper bounds [n_var] or scalar.
+            **kwargs: Optional per-individual/per-gene parameter overrides.
         
         Returns:
             Mutated individuals [n_pop, n_var].
@@ -226,6 +237,7 @@ class Mutation(nn.Module, ABC):
         xl: Optional[Tensor] = None,
         xu: Optional[Tensor] = None,
         problem: Optional["Problem"] = None,
+        **kwargs,
     ) -> Tensor:
         """
         Apply mutation.
@@ -235,9 +247,28 @@ class Mutation(nn.Module, ABC):
             xl: Lower bounds (or provide problem).
             xu: Upper bounds (or provide problem).
             problem: Problem instance with bounds.
+            **kwargs: Optional parameter overrides for per-individual or
+                per-gene operation. Supported kwargs depend on the specific
+                mutation operator (e.g., eta, sigma, prob).
+                
+                Each parameter can be:
+                - scalar: Fixed value for all
+                - [D] tensor: Per-gene values
+                - [N] tensor: Per-individual values
+                - [N, D] tensor: Full matrix
         
         Returns:
             Mutated individuals [n_pop, n_var].
+        
+        Example:
+            >>> # Standard call (uses stored parameters)
+            >>> mutated = mutation(population, xl, xu)
+            >>> 
+            >>> # Per-individual sigma override (for SHADE)
+            >>> mutated = mutation(population, xl, xu, sigma=sigma_per_individual)
+            >>> 
+            >>> # Per-gene eta override
+            >>> mutated = mutation(population, xl, xu, eta=eta_per_gene)
         """
         # Get bounds from problem if provided
         if problem is not None:
@@ -250,7 +281,7 @@ class Mutation(nn.Module, ABC):
         if xu is None:
             xu = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
         
-        return self._mutate(x, xl, xu)
+        return self._mutate(x, xl, xu, **kwargs)
     
     def __call__(
         self,
@@ -258,9 +289,10 @@ class Mutation(nn.Module, ABC):
         xl: Optional[Tensor] = None,
         xu: Optional[Tensor] = None,
         problem: Optional["Problem"] = None,
+        **kwargs,
     ) -> Tensor:
         """Apply mutation (alias for forward)."""
-        return self.forward(x, xl, xu, problem)
+        return self.forward(x, xl, xu, problem, **kwargs)
 
 
 # =============================================================================
@@ -288,9 +320,18 @@ class PolynomialMutation(Mutation):
         learn_prob: If True, mutation probability is learnable.
         n_var: Number of variables.
     
+    Per-Individual/Per-Gene Parameters:
+        The forward() method accepts optional overrides:
+        - eta: Distribution index [scalar, D, N, or N×D]
+        - prob: Mutation probability [scalar, D, N, or N×D]
+    
     Example:
         >>> mutation = PolynomialMutation(eta=20)
         >>> mutated = mutation(population, xl, xu)
+        >>> 
+        >>> # Per-individual eta (for self-adaptive GA)
+        >>> eta_per_ind = torch.rand(pop_size) * 20 + 5  # [N]
+        >>> mutated = mutation(population, xl, xu, eta=eta_per_ind)
     
     Reference:
         Deb & Deb (2014). Analysing Mutation Schemes for
@@ -332,7 +373,23 @@ class PolynomialMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        eta: Optional[Tensor] = None,
+        prob: Optional[Tensor] = None,
+        **kwargs,
     ) -> Tensor:
+        """
+        Apply polynomial mutation.
+        
+        Args:
+            x: Individuals to mutate [N, D].
+            xl: Lower bounds [D] or scalar.
+            xu: Upper bounds [D] or scalar.
+            eta: Optional distribution index override [scalar, D, N, or N×D].
+            prob: Optional mutation probability override [scalar, D, N, or N×D].
+        
+        Returns:
+            Mutated individuals [N, D].
+        """
         n_pop, n_var = x.shape
         device = x.device
         dtype = x.dtype
@@ -343,22 +400,25 @@ class PolynomialMutation(Mutation):
         if xu.dim() == 0:
             xu = xu.expand(n_var)
         
-        # Get mutation mask
-        prob_logits = self._get_prob_logits(n_var, device)
+        # Expand eta to [N, D]
+        eta_expanded = expand_param(eta, self.eta, n_pop, n_var, device, dtype)
         
+        # Expand prob to [N, D]
+        default_prob = self._get_prob(n_var, device)
+        prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
+        
+        # Get mutation mask
         if self.differentiable:
-            logits = prob_logits.unsqueeze(0).expand(n_pop, -1)
-            mask = self._binary_concrete(logits, hard=True)
+            prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
+            mask = binary_concrete(prob_logits)
         else:
-            prob = self._get_prob(n_var, device)
-            mask = (torch.rand(n_pop, n_var, device=device) < prob).float()
+            mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
         # Compute polynomial perturbation
-        eta = self.eta
         u = torch.rand(n_pop, n_var, device=device, dtype=dtype)
         
         # Polynomial distribution
-        mut_pow = 1.0 / (eta + 1.0)
+        mut_pow = 1.0 / (eta_expanded + 1.0)
         
         delta = torch.where(
             u < 0.5,
@@ -408,12 +468,24 @@ class GaussianMutation(Mutation):
         learn_prob: If True, mutation probability is learnable.
         n_var: Number of variables.
     
+    Per-Individual/Per-Gene Parameters:
+        The forward() method accepts optional overrides:
+        - sigma: Standard deviation [scalar, D, N, or N×D]
+        - prob: Mutation probability [scalar, D, N, or N×D]
+        
+        This is essential for SHADE where each individual has its
+        own F (scale factor) that can be used as sigma.
+    
     Example:
         >>> # Fixed sigma
         >>> mutation = GaussianMutation(sigma=0.1)
         >>> 
         >>> # Sigma as fraction of range
         >>> mutation = GaussianMutation(sigma_frac=0.1)  # sigma = 0.1 * (xu - xl)
+        >>> 
+        >>> # Per-individual sigma (for SHADE/DE)
+        >>> F_per_ind = torch.rand(pop_size) * 0.5 + 0.5  # [N]
+        >>> mutated = mutation(population, xl, xu, sigma=F_per_ind)
     """
     
     def __init__(
@@ -455,7 +527,23 @@ class GaussianMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        sigma: Optional[Tensor] = None,
+        prob: Optional[Tensor] = None,
+        **kwargs,
     ) -> Tensor:
+        """
+        Apply Gaussian mutation.
+        
+        Args:
+            x: Individuals to mutate [N, D].
+            xl: Lower bounds [D] or scalar.
+            xu: Upper bounds [D] or scalar.
+            sigma: Optional standard deviation override [scalar, D, N, or N×D].
+            prob: Optional mutation probability override [scalar, D, N, or N×D].
+        
+        Returns:
+            Mutated individuals [N, D].
+        """
         n_pop, n_var = x.shape
         device = x.device
         dtype = x.dtype
@@ -466,24 +554,33 @@ class GaussianMutation(Mutation):
         if xu.dim() == 0:
             xu = xu.expand(n_var)
         
-        # Get mutation mask
-        prob_logits = self._get_prob_logits(n_var, device)
+        # Expand prob to [N, D]
+        default_prob = self._get_prob(n_var, device)
+        prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
+        # Get mutation mask
         if self.differentiable:
-            logits = prob_logits.unsqueeze(0).expand(n_pop, -1)
-            mask = self._binary_concrete(logits, hard=True)
+            prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
+            mask = binary_concrete(prob_logits)
         else:
-            prob = self._get_prob(n_var, device)
-            mask = (torch.rand(n_pop, n_var, device=device) < prob).float()
+            mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
         # Compute sigma (possibly scaled by range)
-        if self._use_frac:
-            sigma = self.sigma * (xu - xl)
+        if sigma is not None:
+            # Use provided sigma
+            sigma_expanded = expand_param(sigma, self.sigma, n_pop, n_var, device, dtype)
+            if self._use_frac:
+                sigma_expanded = sigma_expanded * (xu - xl)
         else:
-            sigma = self.sigma
+            # Use stored sigma
+            if self._use_frac:
+                sigma_expanded = self.sigma * (xu - xl)
+                sigma_expanded = sigma_expanded.unsqueeze(0).expand(n_pop, -1)
+            else:
+                sigma_expanded = expand_param(None, self.sigma, n_pop, n_var, device, dtype)
         
         # Gaussian noise (reparameterised)
-        noise = torch.randn(n_pop, n_var, device=device, dtype=dtype) * sigma
+        noise = torch.randn(n_pop, n_var, device=device, dtype=dtype) * sigma_expanded
         
         # Apply mutation with mask
         y = x + mask * noise
@@ -520,6 +617,10 @@ class UniformMutation(Mutation):
         learn_prob: If True, mutation probability is learnable.
         n_var: Number of variables.
     
+    Per-Individual/Per-Gene Parameters:
+        The forward() method accepts optional overrides:
+        - prob: Mutation probability [scalar, D, N, or N×D]
+    
     Example:
         >>> mutation = UniformMutation(prob=0.05)
         >>> mutated = mutation(population, xl, xu)
@@ -547,7 +648,21 @@ class UniformMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        prob: Optional[Tensor] = None,
+        **kwargs,
     ) -> Tensor:
+        """
+        Apply uniform mutation.
+        
+        Args:
+            x: Individuals to mutate [N, D].
+            xl: Lower bounds [D] or scalar.
+            xu: Upper bounds [D] or scalar.
+            prob: Optional mutation probability override [scalar, D, N, or N×D].
+        
+        Returns:
+            Mutated individuals [N, D].
+        """
         n_pop, n_var = x.shape
         device = x.device
         dtype = x.dtype
@@ -558,15 +673,16 @@ class UniformMutation(Mutation):
         if xu.dim() == 0:
             xu = xu.expand(n_var)
         
-        # Get mutation mask
-        prob_logits = self._get_prob_logits(n_var, device)
+        # Expand prob to [N, D]
+        default_prob = self._get_prob(n_var, device)
+        prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
+        # Get mutation mask
         if self.differentiable:
-            logits = prob_logits.unsqueeze(0).expand(n_pop, -1)
-            mask = self._binary_concrete(logits, hard=True)
+            prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
+            mask = binary_concrete(prob_logits)
         else:
-            prob = self._get_prob(n_var, device)
-            mask = (torch.rand(n_pop, n_var, device=device) < prob).float()
+            mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
         # Random values within bounds
         random_vals = xl + (xu - xl) * torch.rand(n_pop, n_var, device=device, dtype=dtype)
@@ -604,10 +720,19 @@ class NonUniformMutation(Mutation):
         differentiable: If True, use differentiable operations.
         learn_b: If True, b is learnable.
     
+    Per-Individual/Per-Gene Parameters:
+        The forward() method accepts optional overrides:
+        - prob: Mutation probability [scalar, D, N, or N×D]
+        - progress: Progress ratio t/T override [scalar or N]
+    
     Example:
         >>> mutation = NonUniformMutation(max_generations=500, b=5.0)
         >>> mutation.set_generation(100)
         >>> mutated = mutation(population, xl, xu)
+        >>> 
+        >>> # Per-individual progress (for heterogeneous adaptation)
+        >>> progress_per_ind = torch.rand(pop_size)  # [N]
+        >>> mutated = mutation(population, xl, xu, progress=progress_per_ind)
     
     Reference:
         Michalewicz (1996). Genetic Algorithms + Data Structures =
@@ -661,7 +786,23 @@ class NonUniformMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        prob: Optional[Tensor] = None,
+        progress: Optional[Tensor] = None,
+        **kwargs,
     ) -> Tensor:
+        """
+        Apply non-uniform mutation.
+        
+        Args:
+            x: Individuals to mutate [N, D].
+            xl: Lower bounds [D] or scalar.
+            xu: Upper bounds [D] or scalar.
+            prob: Optional mutation probability override [scalar, D, N, or N×D].
+            progress: Optional progress ratio (t/T) override [scalar or N].
+        
+        Returns:
+            Mutated individuals [N, D].
+        """
         n_pop, n_var = x.shape
         device = x.device
         dtype = x.dtype
@@ -672,31 +813,52 @@ class NonUniformMutation(Mutation):
         if xu.dim() == 0:
             xu = xu.expand(n_var)
         
+        # Expand prob to [N, D]
+        default_prob = self._get_prob(n_var, device)
+        prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
+        
         # Get mutation mask
-        prob_logits = self._get_prob_logits(n_var, device)
-        
         if self.differentiable:
-            logits = prob_logits.unsqueeze(0).expand(n_pop, -1)
-            mask = self._binary_concrete(logits, hard=True)
+            prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
+            mask = binary_concrete(prob_logits)
         else:
-            prob = self._get_prob(n_var, device)
-            mask = (torch.rand(n_pop, n_var, device=device) < prob).float()
+            mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
-        # Time decay factor
-        t = self._generation.float()
-        T = float(self.max_generations)
-        decay = (1.0 - t / T).clamp(min=0.0)
+        # Compute progress ratio
+        if progress is not None:
+            if isinstance(progress, Tensor):
+                t_ratio = progress.to(device=device, dtype=dtype)
+                if t_ratio.dim() == 0:
+                    t_ratio = t_ratio.expand(n_pop)
+            else:
+                t_ratio = torch.full((n_pop,), progress, device=device, dtype=dtype)
+        else:
+            t_ratio = torch.full(
+                (n_pop,),
+                self.generation / max(self.max_generations, 1),
+                device=device,
+                dtype=dtype
+            )
         
-        # Random factor
+        # Expand t_ratio to [N, D]
+        t_ratio = t_ratio.unsqueeze(1).expand(-1, n_var)
+        
+        # Compute non-uniform delta
         r = torch.rand(n_pop, n_var, device=device, dtype=dtype)
-        delta_factor = 1.0 - r.pow(decay.pow(self.b))
         
-        # Direction: towards upper or lower bound
+        # decay = (1 - t/T)^b
+        decay = (1.0 - t_ratio).pow(self.b)
+        
+        # delta factor = 1 - r^decay
+        delta_factor = 1.0 - r.pow(decay)
+        
+        # Direction (coin flip per gene)
         direction = (torch.rand(n_pop, n_var, device=device) < 0.5).float()
-        delta_upper = (xu - x) * delta_factor
-        delta_lower = (x - xl) * delta_factor
         
-        delta = direction * delta_upper - (1.0 - direction) * delta_lower
+        # Compute perturbation
+        delta_up = (xu - x) * delta_factor
+        delta_down = (x - xl) * delta_factor
+        delta = direction * delta_up - (1.0 - direction) * delta_down
         
         # Apply mutation with mask
         y = x + mask * delta
@@ -704,11 +866,12 @@ class NonUniformMutation(Mutation):
         return y
     
     def __repr__(self) -> str:
+        prob_str = f"{self.prob.mean().item():.3f}" if self.prob is not None else "1/n_var"
         return (
             f"NonUniformMutation("
-            f"max_gen={self.max_generations}, "
             f"b={self.b.item():.2f}, "
-            f"generation={self.generation})"
+            f"prob={prob_str}, "
+            f"max_gen={self.max_generations})"
         )
 
 
@@ -729,6 +892,10 @@ class BoundaryMutation(Mutation):
         differentiable: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
         learn_prob: If True, mutation probability is learnable.
+    
+    Per-Individual/Per-Gene Parameters:
+        The forward() method accepts optional overrides:
+        - prob: Mutation probability [scalar, D, N, or N×D]
     
     Example:
         >>> mutation = BoundaryMutation(prob=0.01)
@@ -756,9 +923,24 @@ class BoundaryMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        prob: Optional[Tensor] = None,
+        **kwargs,
     ) -> Tensor:
+        """
+        Apply boundary mutation.
+        
+        Args:
+            x: Individuals to mutate [N, D].
+            xl: Lower bounds [D] or scalar.
+            xu: Upper bounds [D] or scalar.
+            prob: Optional mutation probability override [scalar, D, N, or N×D].
+        
+        Returns:
+            Mutated individuals [N, D].
+        """
         n_pop, n_var = x.shape
         device = x.device
+        dtype = x.dtype
         
         # Ensure bounds are tensors
         if xl.dim() == 0:
@@ -766,15 +948,16 @@ class BoundaryMutation(Mutation):
         if xu.dim() == 0:
             xu = xu.expand(n_var)
         
-        # Get mutation mask
-        prob_logits = self._get_prob_logits(n_var, device)
+        # Expand prob to [N, D]
+        default_prob = self._get_prob(n_var, device)
+        prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
+        # Get mutation mask
         if self.differentiable:
-            logits = prob_logits.unsqueeze(0).expand(n_pop, -1)
-            mask = self._binary_concrete(logits, hard=True)
+            prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
+            mask = binary_concrete(prob_logits)
         else:
-            prob = self._get_prob(n_var, device)
-            mask = (torch.rand(n_pop, n_var, device=device) < prob).float()
+            mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
         # Choose lower or upper bound randomly
         use_upper = (torch.rand(n_pop, n_var, device=device) < 0.5).float()
@@ -803,7 +986,7 @@ class NoMutation(Mutation):
     
     Example:
         >>> mutation = NoMutation()
-        >>> mutated = mutation(population, xl, xu)  # Returns population unchanged
+        >>> mutated = mutation(population, xl, xu)  # Returns unchanged
     """
     
     def __init__(self) -> None:
@@ -821,6 +1004,7 @@ class NoMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        **kwargs,
     ) -> Tensor:
         return x
     
@@ -834,23 +1018,31 @@ class NoMutation(Mutation):
 
 class CombinedMutation(Mutation):
     """
-    Combine multiple mutation operators.
+    Combined mutation applying multiple operators sequentially.
     
-    Applies mutations sequentially. Each mutation is applied
-    with its own probability to the output of the previous one.
+    Chains multiple mutation operators together, applying them
+    in sequence to the population.
     
     Args:
-        mutations: List of mutation operators to combine.
+        mutations: List of mutation operators to chain.
     
     Example:
-        >>> mutation = CombinedMutation([
+        >>> combined = CombinedMutation([
+        ...     GaussianMutation(sigma=0.1, prob=0.5),
         ...     PolynomialMutation(eta=20, prob=0.1),
-        ...     GaussianMutation(sigma=0.01, prob=0.05),
         ... ])
-        >>> mutated = mutation(population, xl, xu)
+        >>> mutated = combined(population, xl, xu)
+    
+    Note:
+        Per-individual parameters are NOT propagated to child
+        operators. Use individual operators directly for per-
+        individual control.
     """
     
-    def __init__(self, mutations: list) -> None:
+    def __init__(
+        self,
+        mutations: List[Mutation],
+    ) -> None:
         super().__init__(
             prob=1.0,
             differentiable=False,
@@ -867,12 +1059,18 @@ class CombinedMutation(Mutation):
         x: Tensor,
         xl: Tensor,
         xu: Tensor,
+        **kwargs,
     ) -> Tensor:
+        """
+        Apply all mutations sequentially.
+        
+        Note: kwargs are NOT passed to child operators.
+        """
         y = x
-        for mutation in self.mutations:
-            y = mutation(y, xl, xu)
+        for mut in self.mutations:
+            y = mut(y, xl, xu)
         return y
     
     def __repr__(self) -> str:
-        mut_strs = ", ".join(repr(m) for m in self.mutations)
-        return f"CombinedMutation([{mut_strs}])"
+        muts_str = ", ".join(repr(m) for m in self.mutations)
+        return f"CombinedMutation([{muts_str}])"

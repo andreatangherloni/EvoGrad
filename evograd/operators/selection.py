@@ -42,6 +42,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from evograd.operators.relaxations import gumbel_softmax
+
 __all__ = [
     "Selection",
     "TournamentSelection",
@@ -121,41 +123,7 @@ class Selection(nn.Module, ABC):
         else:
             return fitness
     
-    def _gumbel_softmax(
-        self,
-        logits: Tensor,
-        hard: bool = True,
-        dim: int = -1,
-        eps: float = 1e-10,
-    ) -> Tensor:
-        """
-        Gumbel-Softmax with optional straight-through estimator.
-        
-        Args:
-            logits: Unnormalised log probabilities.
-            hard: If True, use straight-through estimator.
-            dim: Dimension to apply softmax.
-            eps: Small constant for numerical stability.
-        
-        Returns:
-            Soft or hard samples from categorical distribution.
-        """
-        # Sample Gumbel noise
-        u = torch.rand_like(logits)
-        u = torch.clamp(u, eps, 1.0 - eps)
-        gumbels = -torch.log(-torch.log(u))
-        
-        # Apply temperature-scaled softmax
-        y_soft = torch.softmax((logits + gumbels) / self.temperature, dim=dim)
-        
-        if hard:
-            # Straight-through: hard in forward, soft in backward
-            index = y_soft.argmax(dim=dim, keepdim=True)
-            y_hard = torch.zeros_like(y_soft).scatter_(dim, index, 1.0)
-            return (y_hard - y_soft).detach() + y_soft
-        
-        return y_soft
-    
+            
     @abstractmethod
     def _select(
         self,
@@ -300,7 +268,7 @@ class TournamentSelection(Selection):
         if self.differentiable:
             # Gumbel-Softmax selection within each tournament
             # Use scores as logits
-            weights = self._gumbel_softmax(tournament_scores, hard=True, dim=-1)
+            weights = gumbel_softmax(tournament_scores, dim=-1)
             
             # Get tournament participants
             tournament_pop = population[tournament_idx]  # [n_select, k, n_var]
@@ -396,7 +364,7 @@ class RouletteSelection(Selection):
             logits_expanded = logits.unsqueeze(0).expand(n_select, -1)
             
             # Gumbel-Softmax selection
-            weights = self._gumbel_softmax(logits_expanded, hard=True, dim=-1)
+            weights = gumbel_softmax(logits_expanded, dim=-1)
             
             # Weighted combination
             selected = torch.matmul(weights, population)  # [n_select, n_var]
@@ -518,7 +486,7 @@ class RankSelection(Selection):
             logits_expanded = logits.unsqueeze(0).expand(n_select, -1)
             
             # Gumbel-Softmax selection (in rank space)
-            weights = self._gumbel_softmax(logits_expanded, hard=True, dim=-1)
+            weights = gumbel_softmax(logits_expanded, dim=-1)
             
             # Map back to original indices
             sorted_pop = population[sorted_indices]
@@ -592,7 +560,7 @@ class RandomSelection(Selection):
         if self.differentiable:
             # Uniform logits
             logits = torch.zeros(n_select, n_pop, device=device)
-            weights = self._gumbel_softmax(logits, hard=True, dim=-1)
+            weights = gumbel_softmax(logits, dim=-1)
             
             selected = torch.matmul(weights, population)
             indices = weights.argmax(dim=-1)
@@ -682,7 +650,7 @@ class TruncationSelection(Selection):
             top_scores = scores[top_indices]
             logits = top_scores.unsqueeze(0).expand(n_select, -1)
             
-            weights = self._gumbel_softmax(logits, hard=True, dim=-1)
+            weights = gumbel_softmax(logits, dim=-1)
             
             top_pop = population[top_indices]
             selected = torch.matmul(weights, top_pop)
@@ -766,7 +734,7 @@ class StochasticUniversalSampling(Selection):
             logits = torch.log(shifted_scores + self.eps)
             logits_expanded = logits.unsqueeze(0).expand(n_select, -1)
             
-            weights = self._gumbel_softmax(logits_expanded, hard=True, dim=-1)
+            weights = gumbel_softmax(logits_expanded, dim=-1)
             selected = torch.matmul(weights, population)
             indices = weights.argmax(dim=-1)
         else:
