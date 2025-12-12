@@ -187,14 +187,14 @@ class GA(Algorithm):
                 differentiable=differentiable,
             )
         
-        # Call super().__init__() FIRST before any attribute assignments
+        # Call super().__init__() first before any attribute assignments
         super().__init__(
             pop_size=pop_size,
             sampling=sampling,
             selection=selection,
             crossover=crossover,
             mutation=mutation,
-            survival=survival,  # Pass to base class for registration
+            survival=survival,
             repair=repair,
             eliminate_duplicates=eliminate_duplicates,
             n_offsprings=n_offsprings,
@@ -203,9 +203,7 @@ class GA(Algorithm):
             device=device,
             dtype=dtype,
         )
-        
-        # Note: self.survival is now available from base class
-    
+            
     # =========================================================================
     # Properties
     # =========================================================================

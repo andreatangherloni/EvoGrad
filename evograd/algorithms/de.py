@@ -238,7 +238,7 @@ class DE(Algorithm):
         
         # Create selection operator for parent selection in mutation
         # Selection is differentiable when adaptive=True
-        selection = self._create_selection(adaptive, selection_temperature)
+        selection = self._create_random_selection(adaptive, selection_temperature)
         
         # Call base class
         super().__init__(
@@ -283,30 +283,17 @@ class DE(Algorithm):
             )
         return None
     
-    def _create_selection(
-        self,
-        adaptive: bool,
-        temperature: float,
-    ) -> nn.Module:
+    def _create_random_selection(self, adaptive: bool, temperature: float) -> nn.Module:
         """
         Create selection operator for parent selection in mutation.
-        
         When adaptive=True, selection is differentiable with learnable temperature.
         """
-        if adaptive:
-            # Use fitness-proportionate selection with Gumbel-Softmax
-            from evograd.operators.selection import RouletteSelection
-            return RouletteSelection(
-                differentiable=True,
-                temperature=temperature,
-                learn_temperature=True,  # Learn temperature when adaptive
-                minimize=True,
-            )
-        else:
-            # Use random selection in classical mode
-            from evograd.operators.selection import RandomSelection
-            return RandomSelection(replacement=True)
-    
+        from evograd.operators.selection import RandomSelection
+        return RandomSelection(replacement=True,
+                               differentiable=adaptive,
+                               temperature=temperature,
+                               )
+        
     # =========================================================================
     # Setup and Hyperparameters
     # =========================================================================
@@ -393,11 +380,7 @@ class DE(Algorithm):
         Returns:
             Selected individuals [n_select, n_var].
         """
-        return self.selection(
-            self.population,
-            self.fitness,
-            n_select=n_select,
-        )
+        return self.selection(self.population, self.fitness, n_select=n_select)
     
     def _mutate(self) -> Tensor:
         """
