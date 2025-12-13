@@ -1,0 +1,78 @@
+"""
+Run all EvoGrad tests.
+
+Usage:
+    python -m tests.run_all
+    # or
+    python tests/run_all.py
+"""
+
+import sys
+import os
+
+# Add parent to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from tests.test_utils import run_all_tests as test_utils
+from tests.test_core import run_all_tests as test_core
+from tests.test_operators import run_all_tests as test_operators
+
+
+def run_all():
+    """Run all test suites."""
+    print("\n" + "█"*60)
+    print("█" + " "*58 + "█")
+    print("█" + "        EVOGRAD COMPLETE TEST SUITE".center(58) + "█")
+    print("█" + " "*58 + "█")
+    print("█"*60)
+    
+    results = {}
+    
+    # Run utils tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING UTILS TESTS")
+    print("▶"*60)
+    results['utils'] = test_utils()
+    
+    # Run core tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING CORE TESTS")
+    print("▶"*60)
+    results['core'] = test_core()
+    
+    # Run operators tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING OPERATORS TESTS")
+    print("▶"*60)
+    results['operators'] = test_operators()
+    
+    # Summary
+    print("\n\n" + "█"*60)
+    print("█" + " "*58 + "█")
+    print("█" + "        TEST SUMMARY".center(58) + "█")
+    print("█" + " "*58 + "█")
+    print("█"*60)
+    
+    all_passed = True
+    for module, passed in results.items():
+        status = "✓ PASSED" if passed else "✗ FAILED"
+        print(f"   {module:20s} {status}")
+        if not passed:
+            all_passed = False
+    
+    print()
+    if all_passed:
+        print("█"*60)
+        print("█" + "     ✓ ALL TESTS PASSED!".center(58) + "█")
+        print("█"*60)
+    else:
+        print("█"*60)
+        print("█" + "     ✗ SOME TESTS FAILED!".center(58) + "█")
+        print("█"*60)
+    
+    return all_passed
+
+
+if __name__ == "__main__":
+    success = run_all()
+    sys.exit(0 if success else 1)
