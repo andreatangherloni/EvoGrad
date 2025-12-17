@@ -1055,7 +1055,7 @@ class CMAES(Algorithm):
     def __repr__(self) -> str:
         parts = [
             f"CMAES(pop_size={self.pop_size}",
-            f"sigma={float(self.sigma):.4f}",
+            f"sigma={float(self._init_sigma):.4f}",
         ]
         if self._restarts > 0:
             if self._bipop:

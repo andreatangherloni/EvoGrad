@@ -123,7 +123,7 @@ class PSO(Algorithm):
     def __init__(
         self,
         pop_size: int = 100,
-        inertia: float = 0.7,
+        w: float = 0.7,
         c1: float = 1.5,
         c2: float = 1.5,
         v_max_ratio: float = 0.2,
@@ -138,7 +138,7 @@ class PSO(Algorithm):
     ) -> None:
         self.adaptive = adaptive
         self.per_particle_coeffs = per_particle_coeffs
-        self._init_inertia = inertia
+        self._init_inertia = w
         self._init_c1 = c1
         self._init_c2 = c2
         self._v_max_ratio = v_max_ratio
@@ -522,7 +522,7 @@ class PSO(Algorithm):
         
         return (
             f"PSO(pop_size={self.pop_size}, "
-            f"inertia={_fmt(self.inertia)}, "
+            f"w={_fmt(self.inertia)}, "
             f"c1={_fmt(self.c1)}, "
             f"c2={_fmt(self.c2)}, "
             f"adaptive={self.adaptive}, "
@@ -558,7 +558,7 @@ def pso_default(
     """
     return PSO(
         pop_size=pop_size,
-        inertia=0.7,
+        w=0.7,
         c1=1.5,
         c2=1.5,
         adaptive=adaptive,
@@ -601,7 +601,7 @@ def pso_constriction(
     
     return PSO(
         pop_size=pop_size,
-        inertia=chi,  # ~0.7298
+        w=chi,  # ~0.7298
         c1=chi * 2.05,  # ~1.4962
         c2=chi * 2.05,  # ~1.4962
         adaptive=adaptive,
