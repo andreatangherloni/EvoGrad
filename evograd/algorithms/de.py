@@ -177,6 +177,10 @@ class DE(Algorithm):
             - "scalar": Randomise F once per generation
             - "vector": Randomise F per individual
         jitter: If True, add small per-dimension noise to F (classical only).
+        per_individual_coeffs: If True, sample F and CR independently for
+            each individual. In classical mode, sampled from Uniform(0.5, 1.0).
+            In adaptive mode, sampled around the learned base values using
+            reparameterization (gradients flow to learned parameters).
         adaptive: If True, operators are differentiable and hyperparameters
             (F, CR, temperatures) are learned via backpropagation.
         differentiable: If True, population is differentiable and
@@ -203,6 +207,9 @@ class DE(Algorithm):
         >>> 
         >>> # Both adaptive and differentiable
         >>> de = DE(variant="DE/current-to-best/1/bin", adaptive=True, differentiable=True)
+        >>>
+        >>> # Per-individual F and CR (jDE-style)
+        >>> de = DE(variant="DE/rand/1/bin", per_individual_coeffs=True)
     """
     
     def __init__(
@@ -216,6 +223,7 @@ class DE(Algorithm):
         repair: Optional[nn.Module] = None,
         dither: Optional[str] = None,
         jitter: bool = False,
+        per_individual_coeffs: bool = False,
         adaptive: bool = False,
         differentiable: bool = False,
         selection_temperature: float = 1.0,
@@ -227,6 +235,7 @@ class DE(Algorithm):
         self.variant = DEVariant.parse(variant)
         self.dither = dither
         self.jitter = jitter
+        self.per_individual_coeffs = per_individual_coeffs
         self.adaptive = adaptive
         self._init_F = F
         self._init_CR = CR
@@ -334,7 +343,10 @@ class DE(Algorithm):
     
     def _get_F_values(self, n: int) -> Tensor:
         """
-        Get F values, optionally with dither/jitter (classical mode only).
+        Get F values, optionally with dither/jitter/per_individual.
+        
+        In adaptive mode, noise is added around the learned base_F using
+        reparameterization so gradients flow to the learnable parameter.
         
         Args:
             n: Number of F values needed.
@@ -344,28 +356,88 @@ class DE(Algorithm):
         """
         base_F = self.F
         
-        # Dither and jitter only in classical mode (not adaptive)
-        if not self.adaptive:
-            if self.dither == "scalar":
-                # Same random F for all individuals this generation
-                F_val = base_F + 0.1 * (2 * torch.rand(1, device=self.device) - 1)
-                F_val = F_val.expand(n)
-            elif self.dither == "vector":
-                # Different random F for each individual
-                F_val = 0.5 + 0.5 * torch.rand(n, device=self.device)
+        # Per-individual coefficients: sample F around base (or Uniform if classical)
+        if self.per_individual_coeffs:
+            if self.adaptive:
+                # Reparameterized: noise around learned base_F (gradients flow)
+                # F_i = base_F + 0.25 * (2u - 1), u ~ Uniform(0,1) -> F_i ~ Uniform(base_F-0.25, base_F+0.25)
+                noise = 0.25 * (2 * torch.rand(n, device=self.device, dtype=self.dtype) - 1)
+                F_val = base_F + noise
             else:
-                F_val = base_F.expand(n)
+                # Classical: F ~ Uniform(0.5, 1.0)
+                F_val = 0.5 + 0.5 * torch.rand(n, device=self.device, dtype=self.dtype)
+            
+            F_val = F_val.clamp(0.01, 2.0)
             
             if self.jitter:
-                # Add small per-dimension noise
                 n_var = self.n_var
-                jitter_noise = 0.001 * (2 * torch.rand(n, n_var, device=self.device) - 1)
+                jitter_noise = 0.001 * (2 * torch.rand(n, n_var, device=self.device, dtype=self.dtype) - 1)
                 F_val = F_val.unsqueeze(-1) + jitter_noise
+            
+            return F_val
+        
+        # Dither: randomize F per-generation or per-individual
+        if self.dither == "scalar":
+            # Same random F for all individuals this generation
+            if self.adaptive:
+                # Noise around learned base_F
+                noise = 0.1 * (2 * torch.rand(1, device=self.device, dtype=self.dtype) - 1)
+                F_val = (base_F + noise).expand(n)
+            else:
+                F_val = base_F + 0.1 * (2 * torch.rand(1, device=self.device, dtype=self.dtype) - 1)
+                F_val = F_val.expand(n)
+        elif self.dither == "vector":
+            # Different random F for each individual
+            if self.adaptive:
+                # Noise around learned base_F
+                noise = 0.25 * (2 * torch.rand(n, device=self.device, dtype=self.dtype) - 1)
+                F_val = base_F + noise
+            else:
+                F_val = 0.5 + 0.5 * torch.rand(n, device=self.device, dtype=self.dtype)
         else:
-            # Adaptive mode: use learnable F directly
+            # No dither: use base_F directly
             F_val = base_F.expand(n)
         
+        F_val = F_val.clamp(0.01, 2.0)
+        
+        # Jitter: add small per-dimension noise
+        if self.jitter:
+            n_var = self.n_var
+            jitter_noise = 0.001 * (2 * torch.rand(n, n_var, device=self.device, dtype=self.dtype) - 1)
+            if F_val.dim() == 1:
+                F_val = F_val.unsqueeze(-1) + jitter_noise
+            else:
+                F_val = F_val + jitter_noise
+        
         return F_val
+    
+    def _get_CR_values(self, n: int) -> Optional[Tensor]:
+        """
+        Get CR values for per-individual crossover.
+        
+        In adaptive mode, noise is added around the learned CR using
+        reparameterization so gradients flow to the learnable parameter.
+        
+        Args:
+            n: Number of CR values needed.
+        
+        Returns:
+            CR values tensor of shape [n], or None if not using per_individual_coeffs.
+        """
+        if not self.per_individual_coeffs:
+            return None
+        
+        if self.adaptive:
+            # Reparameterized: noise around learned CR (gradients flow)
+            # CR_i = base_CR + 0.25 * (2u - 1), u ~ Uniform(0,1)
+            base_CR = self.CR
+            noise = 0.25 * (2 * torch.rand(n, device=self.device, dtype=self.dtype) - 1)
+            CR_val = base_CR + noise
+        else:
+            # Classical: CR ~ Uniform(0.5, 1.0)
+            CR_val = 0.5 + 0.5 * torch.rand(n, device=self.device, dtype=self.dtype)
+        
+        return CR_val.clamp(0.0, 1.0)
     
     def _select_parents(
         self,
@@ -464,7 +536,12 @@ class DE(Algorithm):
         
         # 2. Crossover: combine target (population) and donor
         if self.crossover is not None:
-            trial = self.crossover(self.population, donor)
+            # Get per-individual CR if enabled
+            cr_values = self._get_CR_values(self.pop_size)
+            if cr_values is not None:
+                trial = self.crossover(self.population, donor, cr=cr_values)
+            else:
+                trial = self.crossover(self.population, donor)
         else:
             # current-to-rand: no crossover, donor is the trial
             trial = donor
@@ -537,6 +614,7 @@ class DE(Algorithm):
             'pop_size': self.pop_size,
             'variant': str(self.variant),
             'F': float(self.F),
+            'per_individual_coeffs': self.per_individual_coeffs,
             'adaptive': self.adaptive,
             'differentiable': self.differentiable,
         }
@@ -584,6 +662,7 @@ class DE(Algorithm):
             f"DE(pop_size={self.pop_size}, "
             f"variant='{self.variant}', "
             f"F={float(self.F):.3f}, "
+            f"per_individual_coeffs={self.per_individual_coeffs}, "
             f"adaptive={self.adaptive}, "
             f"differentiable={self.differentiable})"
         )
@@ -597,6 +676,7 @@ def de_rand_1_bin(
     pop_size: int = 100,
     F: float = 0.5,
     CR: float = 0.9,
+    per_individual_coeffs: bool = False,
     adaptive: bool = False,
     differentiable: bool = False,
     **kwargs,
@@ -608,6 +688,7 @@ def de_rand_1_bin(
         pop_size: Population size.
         F: Mutation scale factor.
         CR: Crossover rate.
+        per_individual_coeffs: If True, sample F and CR per individual.
         adaptive: If True, operators are differentiable with learnable hyperparams.
         differentiable: If True, population is learnable.
         **kwargs: Additional arguments passed to DE.
@@ -620,6 +701,7 @@ def de_rand_1_bin(
         variant="DE/rand/1/bin",
         F=F,
         CR=CR,
+        per_individual_coeffs=per_individual_coeffs,
         adaptive=adaptive,
         differentiable=differentiable,
         **kwargs,
@@ -630,6 +712,7 @@ def de_best_1_bin(
     pop_size: int = 100,
     F: float = 0.5,
     CR: float = 0.9,
+    per_individual_coeffs: bool = False,
     adaptive: bool = False,
     differentiable: bool = False,
     **kwargs,
@@ -641,6 +724,7 @@ def de_best_1_bin(
         pop_size: Population size.
         F: Mutation scale factor.
         CR: Crossover rate.
+        per_individual_coeffs: If True, sample F and CR per individual.
         adaptive: If True, operators are differentiable with learnable hyperparams.
         differentiable: If True, population is learnable.
         **kwargs: Additional arguments passed to DE.
@@ -653,6 +737,7 @@ def de_best_1_bin(
         variant="DE/best/1/bin",
         F=F,
         CR=CR,
+        per_individual_coeffs=per_individual_coeffs,
         adaptive=adaptive,
         differentiable=differentiable,
         **kwargs,
@@ -663,6 +748,7 @@ def de_current_to_best_1_bin(
     pop_size: int = 100,
     F: float = 0.5,
     CR: float = 0.9,
+    per_individual_coeffs: bool = False,
     adaptive: bool = False,
     differentiable: bool = False,
     **kwargs,
@@ -674,6 +760,7 @@ def de_current_to_best_1_bin(
         pop_size: Population size.
         F: Mutation scale factor.
         CR: Crossover rate.
+        per_individual_coeffs: If True, sample F and CR per individual.
         adaptive: If True, operators are differentiable with learnable hyperparams.
         differentiable: If True, population is learnable.
         **kwargs: Additional arguments passed to DE.
@@ -686,6 +773,7 @@ def de_current_to_best_1_bin(
         variant="DE/current-to-best/1/bin",
         F=F,
         CR=CR,
+        per_individual_coeffs=per_individual_coeffs,
         adaptive=adaptive,
         differentiable=differentiable,
         **kwargs,
