@@ -509,4 +509,4 @@ def _step_differentiable(
         else:
             scheduler.step()
     
-    return float(loss)
+    return float(loss.detach())

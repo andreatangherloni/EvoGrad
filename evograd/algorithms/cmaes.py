@@ -764,17 +764,77 @@ class CMAES(Algorithm):
         # Add small diagonal for numerical stability
         C_new = C_new + self._eps * torch.eye(D, device=self.device, dtype=self.dtype)
         
-        # Compute new Cholesky factor
-        try:
-            L_new = torch.linalg.cholesky(C_new)
-        except RuntimeError:
-            # If Cholesky fails, eigendecompose and fix
-            eigval, eigvec = torch.linalg.eigh(C_new)
-            eigval = torch.clamp(eigval, min=1e-12)
-            C_fixed = eigvec @ torch.diag(eigval) @ eigvec.T
-            L_new = torch.linalg.cholesky(C_fixed)
+        # Compute new Cholesky factor with robust fallback
+        L_new = self._safe_cholesky(C_new)
         
         return L_new
+    
+    def _safe_cholesky(self, C: Tensor) -> Tensor:
+        """
+        Compute Cholesky decomposition with robust fallback.
+        
+        If standard Cholesky fails, applies eigenvalue correction
+        and regularization to ensure positive definiteness.
+        
+        Args:
+            C: Covariance matrix [n_var, n_var].
+        
+        Returns:
+            Lower triangular Cholesky factor L where C ≈ L @ L.T.
+        """
+        D = C.shape[0]
+        
+        # Attempt 1: Direct Cholesky
+        try:
+            return torch.linalg.cholesky(C)
+        except RuntimeError:
+            pass
+        
+        # Attempt 2: Eigendecomposition with correction
+        try:
+            # Use eigh for symmetric matrices (more stable than eig)
+            eigval, eigvec = torch.linalg.eigh(C)
+            
+            # Clamp eigenvalues to be positive
+            min_eigval = max(1e-10, float(eigval.max()) * 1e-12)
+            eigval_fixed = torch.clamp(eigval, min=min_eigval)
+            
+            # Reconstruct covariance
+            C_fixed = eigvec @ torch.diag(eigval_fixed) @ eigvec.T
+            
+            # Force symmetry (numerical errors can break it)
+            C_fixed = 0.5 * (C_fixed + C_fixed.T)
+            
+            # Add small diagonal regularization
+            reg = 1e-8 * eigval_fixed.max() * torch.eye(D, device=C.device, dtype=C.dtype)
+            C_fixed = C_fixed + reg
+            
+            return torch.linalg.cholesky(C_fixed)
+        except RuntimeError:
+            pass
+        
+        # Attempt 3: More aggressive regularization
+        try:
+            eigval, eigvec = torch.linalg.eigh(C)
+            eigval_fixed = torch.clamp(eigval, min=1e-6)
+            C_fixed = eigvec @ torch.diag(eigval_fixed) @ eigvec.T
+            C_fixed = 0.5 * (C_fixed + C_fixed.T)
+            
+            # Stronger regularization
+            reg = 1e-4 * torch.eye(D, device=C.device, dtype=C.dtype)
+            C_fixed = C_fixed + reg
+            
+            return torch.linalg.cholesky(C_fixed)
+        except RuntimeError:
+            pass
+        
+        # Attempt 4: Last resort - reset to scaled identity
+        # Preserve the trace (total variance) from original matrix
+        trace = torch.trace(C).clamp(min=1e-6)
+        scale = torch.sqrt(trace / D)
+        L_identity = scale * torch.eye(D, device=C.device, dtype=C.dtype)
+        
+        return L_identity
     
     def _update_sigma(self, new_p_sigma: Tensor) -> Tensor:
         """

@@ -496,7 +496,7 @@ class PSO(Algorithm):
         """Return current hyperparameter values."""
         def _to_float(x: Tensor) -> float:
             if x.numel() == 1:
-                return float(x)
+                return float(x.item())
             return float(x.mean().item())
         
         return {
@@ -517,7 +517,7 @@ class PSO(Algorithm):
     def __repr__(self) -> str:
         def _fmt(x: Tensor) -> str:
             if x.numel() == 1:
-                return f"{float(x):.3f}"
+                return f"{float(x.item()):.3f}"
             return f"{float(x.mean().item()):.3f}"
         
         return (

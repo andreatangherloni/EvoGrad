@@ -278,10 +278,10 @@ class HistoryCallback(Callback):
         # Fitness statistics
         if self.track_fitness_stats and state.current_fitness is not None:
             fitness = state.current_fitness
-            self.mean_fitness.append(float(fitness.mean()))
-            self.std_fitness.append(float(fitness.std()))
-            self.min_fitness.append(float(fitness.min()))
-            self.max_fitness.append(float(fitness.max()))
+            self.mean_fitness.append(float(fitness.mean().item()))
+            self.std_fitness.append(float(fitness.std().item()))
+            self.min_fitness.append(float(fitness.min().item()))
+            self.max_fitness.append(float(fitness.max().item()))
         
         # Hyperparameters
         if self.track_hyperparams and state.hyperparams:
