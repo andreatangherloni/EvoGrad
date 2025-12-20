@@ -613,7 +613,7 @@ class DE(Algorithm):
         params = {
             'pop_size': self.pop_size,
             'variant': str(self.variant),
-            'F': float(self.F),
+            'F': float(self.F.item()),
             'per_individual_coeffs': self.per_individual_coeffs,
             'adaptive': self.adaptive,
             'differentiable': self.differentiable,
@@ -623,17 +623,17 @@ class DE(Algorithm):
         if self.crossover is not None and hasattr(self.crossover, 'cr'):
             cr = self.crossover.cr
             if isinstance(cr, Tensor):
-                params['CR'] = float(cr.mean())
+                params['CR'] = float(cr.mean().item())
             else:
                 params['CR'] = float(cr)
         
         # Add selection temperature
         if hasattr(self.selection, 'temperature'):
-            params['selection_temperature'] = float(self.selection.temperature)
+            params['selection_temperature'] = float(self.selection.temperature.item())
         
         # Add crossover temperature
         if self.crossover is not None and hasattr(self.crossover, 'temperature'):
-            params['crossover_temperature'] = float(self.crossover.temperature)
+            params['crossover_temperature'] = float(self.crossover.temperature.item())
         
         return params
     
@@ -661,7 +661,7 @@ class DE(Algorithm):
         return (
             f"DE(pop_size={self.pop_size}, "
             f"variant='{self.variant}', "
-            f"F={float(self.F):.3f}, "
+            f"F={float(self.F.item()):.3f}, "
             f"per_individual_coeffs={self.per_individual_coeffs}, "
             f"adaptive={self.adaptive}, "
             f"differentiable={self.differentiable})"

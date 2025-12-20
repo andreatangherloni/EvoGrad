@@ -497,7 +497,7 @@ class PSO(Algorithm):
         def _to_float(x: Tensor) -> float:
             if x.numel() == 1:
                 return float(x)
-            return float(x.mean())
+            return float(x.mean().item())
         
         return {
             'pop_size': self.pop_size,
@@ -518,7 +518,7 @@ class PSO(Algorithm):
         def _fmt(x: Tensor) -> str:
             if x.numel() == 1:
                 return f"{float(x):.3f}"
-            return f"{float(x.mean()):.3f}"
+            return f"{float(x.mean().item()):.3f}"
         
         return (
             f"PSO(pop_size={self.pop_size}, "

@@ -705,8 +705,8 @@ class SHADE(Algorithm):
             'archive_rate': self.archive_rate,
             'adaptive': self.adaptive,
             'differentiable': self.differentiable,
-            'M_F_mean': float(self.M_F.mean().detach()),
-            'M_CR_mean': float(self.M_CR.mean().detach()),
+            'M_F_mean': float(self.M_F.mean().item()),
+            'M_CR_mean': float(self.M_CR.mean().item()),
             'archive_size': self.memory.archive_size,
         }
         return params
