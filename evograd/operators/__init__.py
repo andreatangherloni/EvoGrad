@@ -15,7 +15,8 @@ Selection (parent selection):
     - RouletteSelection: Fitness-proportionate selection
     - RankSelection: Rank-based selection
     - RandomSelection: Uniform random selection
-    - TruncationSelection: Select from top fraction
+    - TruncationSelection: Select from top fraction (samples within elite set)
+    - TopKSelection: Deterministic top-k WITHOUT replacement
     - StochasticUniversalSampling: Evenly-spaced roulette
 
 Crossover (recombination):
@@ -69,6 +70,8 @@ from evograd.operators.selection import (
     RouletteSelection,
     RankSelection,
     RandomSelection,
+    TopKSelection,
+    TopKSelection,
     TruncationSelection,
     StochasticUniversalSampling,
 )
@@ -132,6 +135,7 @@ __all__ = [
     "RouletteSelection",
     "RankSelection",
     "RandomSelection",
+    "TopKSelection",
     "TruncationSelection",
     "StochasticUniversalSampling",
     # Crossover

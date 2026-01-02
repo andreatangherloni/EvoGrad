@@ -455,7 +455,7 @@ class DeviceContext:
         if isinstance(device, str):
             device = torch.device(device)
         self.device = device
-        self._previous_device: Optional[torch.device] = None
+        self._previous_device: Optional[int] = None
 
     def __enter__(self) -> torch.device:
         # Store current default device (if CUDA)
@@ -465,7 +465,7 @@ class DeviceContext:
                 torch.cuda.set_device(self.device.index)
         return self.device
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         # Restore previous device
         if self._previous_device is not None and torch.cuda.is_available():
             torch.cuda.set_device(self._previous_device)

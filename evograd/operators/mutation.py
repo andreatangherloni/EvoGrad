@@ -3,7 +3,8 @@ Mutation operators for introducing variation.
 
 This module provides mutation operators that introduce random
 perturbations to individuals, promoting exploration of the search
-space. All operators support both classical and differentiable modes.
+space. All operators support both classical and differentiable
+(i.e., adaptive) modes.
 
 Available mutations:
     - PolynomialMutation: Bounded polynomial mutation (GA)
@@ -15,7 +16,7 @@ Available mutations:
     - CombinedMutation: Chain multiple mutations
 
 Differentiable Mode:
-    When `differentiable=True`, mutation masks use Binary-Concrete
+    When `adaptive=True`, mutation masks use Binary-Concrete
     (Gumbel-Sigmoid) relaxation, and perturbations use the
     reparameterisation trick for gradient flow.
 
@@ -50,7 +51,7 @@ Example:
     >>> mutation = PolynomialMutation(
     ...     eta=20,
     ...     prob=0.1,
-    ...     differentiable=True,
+    ...     adaptive=True,
     ...     learn_eta=True,
     ... )
     >>> offspring = mutation(population, xl, xu)
@@ -61,6 +62,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, List, Optional, Union
 
+import math
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -95,7 +97,7 @@ class Mutation(nn.Module, ABC):
     
     Args:
         prob: Mutation probability per gene. If None, defaults to 1/n_var.
-        differentiable: If True, use Binary-Concrete for soft masks.
+        adaptive: If True, use Binary-Concrete for soft masks.
         temperature: Temperature for Binary-Concrete.
         learn_temperature: If True, temperature is learnable.
         learn_prob: If True, mutation probability is learnable.
@@ -117,7 +119,7 @@ class Mutation(nn.Module, ABC):
     def __init__(
         self,
         prob: Optional[float] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         learn_prob: bool = True,
@@ -125,12 +127,15 @@ class Mutation(nn.Module, ABC):
     ) -> None:
         super().__init__()
         
-        self.differentiable = differentiable
+        self._MIN_TEMPERATURE = 0.05
+        self._MAX_TEMPERATURE = 10.0
+        
+        self.adaptive = adaptive
         self.n_var = n_var
         self._default_prob = prob is None
         
         # Temperature parameter (log for positivity)
-        if learn_temperature and differentiable:
+        if learn_temperature and adaptive:
             self._log_temperature = nn.Parameter(
                 torch.tensor(temperature).log()
             )
@@ -144,7 +149,7 @@ class Mutation(nn.Module, ABC):
         # If prob is None, we'll compute 1/n_var at runtime
         if prob is not None:
             prob_logit = self._prob_to_logit(prob)
-            if learn_prob and differentiable:
+            if learn_prob and adaptive:
                 if n_var is not None:
                     self.prob_logits = nn.Parameter(
                         torch.full((n_var,), prob_logit)
@@ -208,6 +213,14 @@ class Mutation(nn.Module, ABC):
             self._prob_to_logit(default_prob),
             device=device
         )
+    
+    def _clamp_temperature(self):
+        if hasattr(self, "_log_temperature") and self._log_temperature is not None:
+            with torch.no_grad():
+                self._log_temperature.clamp_(
+                    math.log(self._MIN_TEMPERATURE),
+                    math.log(self._MAX_TEMPERATURE),
+                )
     
     @abstractmethod
     def _mutate(
@@ -281,6 +294,7 @@ class Mutation(nn.Module, ABC):
         if xu is None:
             xu = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
         
+        self._clamp_temperature()
         return self._mutate(x, xl, xu, **kwargs)
     
     def __call__(
@@ -314,7 +328,7 @@ class PolynomialMutation(Mutation):
     Args:
         eta: Distribution index (higher = smaller perturbations).
         prob: Mutation probability per gene. If None, defaults to 1/n_var.
-        differentiable: If True, use Binary-Concrete masks.
+        adaptive: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
         learn_eta: If True, eta is learnable.
         learn_prob: If True, mutation probability is learnable.
@@ -342,7 +356,7 @@ class PolynomialMutation(Mutation):
         self,
         eta: float = 20.0,
         prob: Optional[float] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_eta: bool = True,
         learn_prob: bool = True,
@@ -350,7 +364,7 @@ class PolynomialMutation(Mutation):
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_prob,
@@ -358,7 +372,7 @@ class PolynomialMutation(Mutation):
         )
         
         # Eta parameter (log for positivity)
-        if learn_eta and differentiable:
+        if learn_eta and adaptive:
             self._log_eta = nn.Parameter(torch.tensor(eta).log())
         else:
             self.register_buffer("_log_eta", torch.tensor(eta).log())
@@ -408,9 +422,12 @@ class PolynomialMutation(Mutation):
         prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
         # Get mutation mask
-        if self.differentiable:
+        if self.adaptive:
             prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(prob_logits)
+            mask = binary_concrete(
+                prob_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
@@ -441,7 +458,7 @@ class PolynomialMutation(Mutation):
             f"PolynomialMutation("
             f"eta={self.eta.item():.2f}, "
             f"prob={prob_str}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -462,7 +479,7 @@ class GaussianMutation(Mutation):
         sigma_frac: Sigma as fraction of range (alternative to sigma).
             If both provided, sigma takes precedence.
         prob: Mutation probability per gene. If None, defaults to 1/n_var.
-        differentiable: If True, use reparameterisation trick.
+        adaptive: If True, use reparameterisation trick.
         temperature: Temperature for Binary-Concrete mask.
         learn_sigma: If True, sigma is learnable.
         learn_prob: If True, mutation probability is learnable.
@@ -493,7 +510,7 @@ class GaussianMutation(Mutation):
         sigma: Optional[float] = None,
         sigma_frac: float = 0.1,
         prob: Optional[float] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_sigma: bool = True,
         learn_prob: bool = True,
@@ -501,7 +518,7 @@ class GaussianMutation(Mutation):
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_prob,
@@ -512,7 +529,7 @@ class GaussianMutation(Mutation):
         
         # Sigma parameter (log for positivity)
         sigma_val = sigma if sigma is not None else sigma_frac
-        if learn_sigma and differentiable:
+        if learn_sigma and adaptive:
             self._log_sigma = nn.Parameter(torch.tensor(sigma_val).log())
         else:
             self.register_buffer("_log_sigma", torch.tensor(sigma_val).log())
@@ -559,9 +576,12 @@ class GaussianMutation(Mutation):
         prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
         # Get mutation mask
-        if self.differentiable:
+        if self.adaptive:
             prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(prob_logits)
+            mask = binary_concrete(
+                prob_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
@@ -594,7 +614,7 @@ class GaussianMutation(Mutation):
             f"GaussianMutation("
             f"sigma={self.sigma.item():.4f} ({sigma_type}), "
             f"prob={prob_str}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -612,7 +632,7 @@ class UniformMutation(Mutation):
     
     Args:
         prob: Mutation probability per gene. If None, defaults to 1/n_var.
-        differentiable: If True, use Binary-Concrete masks.
+        adaptive: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
         learn_prob: If True, mutation probability is learnable.
         n_var: Number of variables.
@@ -629,14 +649,14 @@ class UniformMutation(Mutation):
     def __init__(
         self,
         prob: Optional[float] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_prob: bool = True,
         n_var: Optional[int] = None,
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_prob,
@@ -678,9 +698,12 @@ class UniformMutation(Mutation):
         prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
         # Get mutation mask
-        if self.differentiable:
+        if self.adaptive:
             prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(prob_logits)
+            mask = binary_concrete(
+                prob_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
@@ -717,7 +740,7 @@ class NonUniformMutation(Mutation):
         max_generations: Maximum number of generations (T).
         b: Shape parameter controlling decay (higher = faster decay).
         prob: Mutation probability per gene.
-        differentiable: If True, use differentiable operations.
+        adaptive: If True, use differentiable operations.
         learn_b: If True, b is learnable.
     
     Per-Individual/Per-Gene Parameters:
@@ -744,12 +767,12 @@ class NonUniformMutation(Mutation):
         max_generations: int = 500,
         b: float = 5.0,
         prob: Optional[float] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         learn_b: bool = True,
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=1.0,
             learn_temperature=False,
             learn_prob=False,
@@ -762,7 +785,7 @@ class NonUniformMutation(Mutation):
         self.register_buffer("_generation", torch.tensor(0))
         
         # B parameter (log for positivity)
-        if learn_b and differentiable:
+        if learn_b and adaptive:
             self._log_b = nn.Parameter(torch.tensor(b).log())
         else:
             self.register_buffer("_log_b", torch.tensor(b).log())
@@ -818,9 +841,12 @@ class NonUniformMutation(Mutation):
         prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
         # Get mutation mask
-        if self.differentiable:
+        if self.adaptive:
             prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(prob_logits)
+            mask = binary_concrete(
+                prob_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
@@ -889,7 +915,7 @@ class BoundaryMutation(Mutation):
     
     Args:
         prob: Mutation probability per gene. If None, defaults to 1/n_var.
-        differentiable: If True, use Binary-Concrete masks.
+        adaptive: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
         learn_prob: If True, mutation probability is learnable.
     
@@ -905,13 +931,13 @@ class BoundaryMutation(Mutation):
     def __init__(
         self,
         prob: Optional[float] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_prob: bool = True,
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_prob,
@@ -953,9 +979,12 @@ class BoundaryMutation(Mutation):
         prob_expanded = expand_param(prob, default_prob, n_pop, n_var, device, dtype)
         
         # Get mutation mask
-        if self.differentiable:
+        if self.adaptive:
             prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(prob_logits)
+            mask = binary_concrete(
+                prob_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
@@ -992,7 +1021,7 @@ class NoMutation(Mutation):
     def __init__(self) -> None:
         super().__init__(
             prob=0.0,
-            differentiable=False,
+            adaptive=False,
             temperature=1.0,
             learn_temperature=False,
             learn_prob=False,
@@ -1045,7 +1074,7 @@ class CombinedMutation(Mutation):
     ) -> None:
         super().__init__(
             prob=1.0,
-            differentiable=False,
+            adaptive=False,
             temperature=1.0,
             learn_temperature=False,
             learn_prob=False,

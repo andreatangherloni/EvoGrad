@@ -3,17 +3,18 @@ Selection operators for parent selection.
 
 This module provides strategies for selecting parents from the
 population for recombination. All selectors support both classical
-(hard) and differentiable (Gumbel-Softmax) modes.
+(hard) and differentiable (i.e., adaptive) (Gumbel-Softmax) modes.
 
 Available selectors:
     - TournamentSelection: Tournament-based selection
     - RouletteSelection: Fitness-proportionate selection
     - RankSelection: Rank-based selection
     - RandomSelection: Uniform random selection
-    - TruncationSelection: Select top-k individuals
+    - TruncationSelection: Select *from* the top fraction (samples within truncated set)
+    - TopKSelection: Deterministic top-k WITHOUT replacement (hard + differentiable)
 
 Differentiable Mode:
-    When `differentiable=True`, selection uses Gumbel-Softmax
+    When `adaptive=True`, selection uses Gumbel-Softmax
     relaxation with straight-through estimator, allowing gradients
     to flow through the selection process.
 
@@ -27,7 +28,7 @@ Example:
     >>> # Differentiable mode
     >>> selector = TournamentSelection(
     ...     tournament_size=3,
-    ...     differentiable=True,
+    ...     adaptive=True,
     ...     temperature=1.0,
     ... )
     >>> parents = selector(population, fitness, n_parents=50)
@@ -38,6 +39,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Union
 
+import math
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -50,7 +52,9 @@ __all__ = [
     "RouletteSelection",
     "RankSelection",
     "RandomSelection",
+    "TopKSelection",
     "TruncationSelection",
+    "StochasticUniversalSampling",
 ]
 
 
@@ -66,7 +70,7 @@ class Selection(nn.Module, ABC):
         - _select(): Perform selection and return indices
     
     Args:
-        differentiable: If True, use Gumbel-Softmax for soft selection.
+        adaptive: If True, use Gumbel-Softmax for soft selection.
         temperature: Temperature for Gumbel-Softmax (lower = harder).
         learn_temperature: If True, temperature is a learnable parameter.
         minimize: If True, lower fitness is better (default).
@@ -74,18 +78,21 @@ class Selection(nn.Module, ABC):
     
     def __init__(
         self,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
     ) -> None:
         super().__init__()
         
-        self.differentiable = differentiable
+        self._MIN_TEMPERATURE = 0.05
+        self._MAX_TEMPERATURE = 10.0
+        
+        self.adaptive = adaptive
         self.minimize = minimize
         
         # Temperature parameter
-        if learn_temperature and differentiable:
+        if learn_temperature and adaptive:
             # Store as log for positivity
             self._log_temperature = nn.Parameter(
                 torch.tensor(temperature).log()
@@ -123,7 +130,16 @@ class Selection(nn.Module, ABC):
         else:
             return fitness
     
-            
+    
+    def _clamp_temperature(self):
+        # Clamp temperature for numerical stability (operator responsibility)
+        if hasattr(self, "_log_temperature") and self._log_temperature is not None:
+            with torch.no_grad():
+                self._log_temperature.clamp_(
+                    math.log(self._MIN_TEMPERATURE),
+                    math.log(self._MAX_TEMPERATURE),
+                )
+    
     @abstractmethod
     def _select(
         self,
@@ -165,9 +181,11 @@ class Selection(nn.Module, ABC):
             Selected individuals [n_select, n_var], or
             tuple (selected, indices) if return_indices=True.
         """
+        
         if n_select is None:
             n_select = population.shape[0]
         
+        self._clamp_temperature()
         result = self._select(population, fitness, n_select)
         
         if return_indices:
@@ -204,7 +222,7 @@ class TournamentSelection(Selection):
     
     Args:
         tournament_size: Number of individuals per tournament.
-        differentiable: If True, use Gumbel-Softmax selection.
+        adaptive: If True, use Gumbel-Softmax selection.
         temperature: Temperature for Gumbel-Softmax.
         learn_temperature: If True, temperature is learnable.
         minimize: If True, lower fitness is better.
@@ -218,14 +236,14 @@ class TournamentSelection(Selection):
     def __init__(
         self,
         tournament_size: int = 3,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
         replacement: bool = True,
     ) -> None:
         super().__init__(
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -265,10 +283,14 @@ class TournamentSelection(Selection):
         # Get scores for tournament participants
         tournament_scores = scores[tournament_idx]  # [n_select, k]
         
-        if self.differentiable:
+        if self.adaptive:
             # Gumbel-Softmax selection within each tournament
-            # Use scores as logits
-            weights = gumbel_softmax(tournament_scores, dim=-1)
+            # Use scores as logits, PASS TEMPERATURE
+            weights = gumbel_softmax(
+                tournament_scores, 
+                temperature=self.temperature,  # Pass temperature
+                dim=-1
+            )
             
             # Get tournament participants
             tournament_pop = population[tournament_idx]  # [n_select, k, n_var]
@@ -291,7 +313,7 @@ class TournamentSelection(Selection):
         return (
             f"TournamentSelection("
             f"tournament_size={self.tournament_size}, "
-            f"differentiable={self.differentiable}, "
+            f"adaptive={self.adaptive}, "
             f"temperature={self.temperature.item():.3f})"
         )
 
@@ -311,7 +333,7 @@ class RouletteSelection(Selection):
     entire population with fitness-based logits.
     
     Args:
-        differentiable: If True, use Gumbel-Softmax selection.
+        adaptive: If True, use Gumbel-Softmax selection.
         temperature: Temperature for Gumbel-Softmax.
         learn_temperature: If True, temperature is learnable.
         minimize: If True, lower fitness is better.
@@ -328,14 +350,14 @@ class RouletteSelection(Selection):
     
     def __init__(
         self,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
         eps: float = 1e-10,
     ) -> None:
         super().__init__(
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -356,15 +378,19 @@ class RouletteSelection(Selection):
         # Shift scores to be positive (for probability calculation)
         shifted_scores = scores - scores.min() + self.eps
         
-        if self.differentiable:
+        if self.adaptive:
             # Use log-probabilities as logits
             logits = torch.log(shifted_scores + self.eps)
             
             # Expand logits for n_select samples
             logits_expanded = logits.unsqueeze(0).expand(n_select, -1)
             
-            # Gumbel-Softmax selection
-            weights = gumbel_softmax(logits_expanded, dim=-1)
+            # Gumbel-Softmax selection, PASS TEMPERATURE
+            weights = gumbel_softmax(
+                logits_expanded, 
+                temperature=self.temperature,  # Pass temperature
+                dim=-1
+            )
             
             # Weighted combination
             selected = torch.matmul(weights, population)  # [n_select, n_var]
@@ -380,7 +406,7 @@ class RouletteSelection(Selection):
     def __repr__(self) -> str:
         return (
             f"RouletteSelection("
-            f"differentiable={self.differentiable}, "
+            f"adaptive={self.adaptive}, "
             f"temperature={self.temperature.item():.3f})"
         )
 
@@ -406,7 +432,7 @@ class RankSelection(Selection):
         selection_pressure: Controls selection intensity.
             For 'linear': in [1.0, 2.0], higher = more pressure.
             For 'exponential': decay factor, higher = more pressure.
-        differentiable: If True, use Gumbel-Softmax selection.
+        adaptive: If True, use Gumbel-Softmax selection.
         temperature: Temperature for Gumbel-Softmax.
         learn_temperature: If True, temperature is learnable.
         minimize: If True, lower fitness is better.
@@ -420,13 +446,13 @@ class RankSelection(Selection):
         self,
         scheme: str = "linear",
         selection_pressure: float = 1.5,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
     ) -> None:
         super().__init__(
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -480,13 +506,17 @@ class RankSelection(Selection):
         # Compute rank-based probabilities
         rank_probs = self._compute_rank_probabilities(n_pop, device, dtype)
         
-        if self.differentiable:
+        if self.adaptive:
             # Use log-probabilities as logits
             logits = torch.log(rank_probs + 1e-10)
             logits_expanded = logits.unsqueeze(0).expand(n_select, -1)
             
-            # Gumbel-Softmax selection (in rank space)
-            weights = gumbel_softmax(logits_expanded, dim=-1)
+            # Gumbel-Softmax selection (in rank space), PASS TEMPERATURE
+            weights = gumbel_softmax(
+                logits_expanded, 
+                temperature=self.temperature,  # Pass temperature
+                dim=-1
+            )
             
             # Map back to original indices
             sorted_pop = population[sorted_indices]
@@ -508,7 +538,7 @@ class RankSelection(Selection):
             f"RankSelection("
             f"scheme='{self.scheme}', "
             f"selection_pressure={self.selection_pressure}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -526,7 +556,7 @@ class RandomSelection(Selection):
     
     Args:
         replacement: If True, allow selecting same individual multiple times.
-        differentiable: If True, use Gumbel-Softmax (uniform logits).
+        adaptive: If True, use Gumbel-Softmax (uniform logits).
         temperature: Temperature for Gumbel-Softmax.
     
     Example:
@@ -537,11 +567,11 @@ class RandomSelection(Selection):
     def __init__(
         self,
         replacement: bool = True,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
     ) -> None:
         super().__init__(
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=False,
             minimize=True,
@@ -557,10 +587,14 @@ class RandomSelection(Selection):
         n_pop = population.shape[0]
         device = population.device
         
-        if self.differentiable:
+        if self.adaptive:
             # Uniform logits
             logits = torch.zeros(n_select, n_pop, device=device)
-            weights = gumbel_softmax(logits, dim=-1)
+            weights = gumbel_softmax(
+                logits, 
+                temperature=self.temperature,  # Pass temperature
+                dim=-1
+            )
             
             selected = torch.matmul(weights, population)
             indices = weights.argmax(dim=-1)
@@ -582,6 +616,183 @@ class RandomSelection(Selection):
         return f"RandomSelection(replacement={self.replacement})"
 
 
+
+# =============================================================================
+# Top-K Selection (Deterministic / Without Replacement)
+# =============================================================================
+
+
+class TopKSelection(Selection):
+    """
+    Top-k (elitist) selection without replacement.
+
+    Selects the best `k` individuals according to fitness. This is the
+    canonical "take the best" operator. Unlike most parent selectors,
+    this returns a *subset* of the population (no duplicates).
+
+    In differentiable mode, uses a sequential (without replacement)
+    straight-through Gumbel-Softmax relaxation.
+
+    Args:
+        adaptive: If True, use differentiable top-k selection.
+        temperature: Temperature for Gumbel-Softmax.
+        learn_temperature: If True, temperature is learnable.
+        minimize: If True, lower fitness is better.
+
+    Example:
+        >>> # Keep best 10 individuals
+        >>> selector = TopKSelection()
+        >>> best10, idx = selector(population, fitness, n_select=10)
+    """
+
+
+    @staticmethod
+    def best_indices(
+        fitness: Tensor,
+        k: int,
+        minimize: bool = True,
+    ) -> Tensor:
+        """Return indices of the best-k individuals (no replacement)."""
+        scores = -fitness if minimize else fitness
+        return torch.topk(scores, k=k, largest=True).indices
+
+    @staticmethod
+    def worst_indices(
+        fitness: Tensor,
+        k: int,
+        minimize: bool = True,
+    ) -> Tensor:
+        """Return indices of the worst-k individuals (no replacement)."""
+        scores = -fitness if minimize else fitness
+        return torch.topk(scores, k=k, largest=False).indices
+
+    @staticmethod
+    def sort_indices_best_first(
+        fitness: Tensor,
+        minimize: bool = True,
+    ) -> Tensor:
+        """Return indices sorting the population best->worst."""
+        scores = -fitness if minimize else fitness
+        return torch.argsort(scores, descending=True)
+
+    @staticmethod
+    def gumbel_topk(
+        logits: Tensor,
+        k: int,
+        temperature: Union[float, Tensor] = 1.0,
+        dim: int = -1,
+        eps: float = 1e-10,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Differentiable top-k without replacement using sequential Gumbel-Softmax.
+
+        Forward pass returns hard one-hot selections (straight-through),
+        and we mask out previously selected items to avoid duplicates.
+
+        Args:
+            logits: Logits over items [..., n_items].
+            k: Number of items to select.
+            temperature: Gumbel-Softmax temperature.
+            dim: Dimension along which to select.
+            eps: Numerical stability constant.
+
+        Returns:
+            weights: Selection weights [..., k, n_items] (one-hot ST).
+            indices: Selected indices [..., k].
+        """
+        if k <= 0:
+            raise ValueError(f"k must be > 0, got {k}")
+
+        n_items = logits.shape[dim]
+        if k > n_items:
+            raise ValueError(f"Cannot select k={k} from n_items={n_items}")
+
+        # Work on a copy we can mask in-place
+        masked_logits = logits.clone()
+
+        weights_list = []
+        indices_list = []
+
+        for _ in range(k):
+            w = gumbel_softmax(
+                masked_logits,
+                temperature=temperature,
+                dim=dim,
+                eps=eps,
+            )
+            idx = w.argmax(dim=dim)
+
+            weights_list.append(w)
+            indices_list.append(idx)
+
+            # Mask selected items so they cannot be chosen again
+            # (use a large negative number instead of -inf for safety)
+            if dim != -1:
+                # Move selection dim to end for consistent masking
+                perm = list(range(masked_logits.dim()))
+                perm[dim], perm[-1] = perm[-1], perm[dim]
+                masked_logits = masked_logits.permute(perm)
+
+                # idx now refers to last dim
+                scatter_idx = idx.unsqueeze(-1)
+                masked_logits = masked_logits.scatter(-1, scatter_idx, -1e9)
+
+                # Restore original dim order
+                inv = [0] * len(perm)
+                for i, p in enumerate(perm):
+                    inv[p] = i
+                masked_logits = masked_logits.permute(inv)
+            else:
+                masked_logits = masked_logits.scatter(
+                    -1, idx.unsqueeze(-1), -1e9
+                )
+
+        weights = torch.stack(weights_list, dim=-2)  # [..., k, n_items]
+        indices = torch.stack(indices_list, dim=-1)  # [..., k]
+        return weights, indices
+
+    def _select(
+        self,
+        population: Tensor,
+        fitness: Tensor,
+        n_select: int,
+    ) -> Tuple[Tensor, Tensor]:
+        n_pop, n_var = population.shape
+        device = population.device
+
+        if n_select > n_pop:
+            raise ValueError(f"Cannot select {n_select} from {n_pop} without replacement")
+
+        scores = self._fitness_to_scores(fitness)
+
+        if self.adaptive:
+            # Sequential Gumbel top-k in score space
+            logits = scores.unsqueeze(0)  # [1, n_pop]
+            weights, idx = self.gumbel_topk(
+                logits,
+                k=n_select,
+                temperature=self.temperature,
+                dim=-1,
+            )
+
+            # weights: [1, k, n_pop]
+            # Build k selected individuals as soft/hard mixtures
+            selected = torch.matmul(weights.squeeze(0), population)  # [k, n_var]
+            indices = idx.squeeze(0)  # [k]
+        else:
+            # Hard deterministic top-k
+            indices = torch.topk(scores, n_select, largest=True).indices
+            selected = population[indices]
+
+        return selected, indices
+
+    def __repr__(self) -> str:
+        return (
+            f"TopKSelection("
+            f"adaptive={self.adaptive}, "
+            f"temperature={self.temperature.item():.3f})"
+        )
+
 # =============================================================================
 # Truncation Selection
 # =============================================================================
@@ -591,11 +802,11 @@ class TruncationSelection(Selection):
     Truncation (elitist) selection.
     
     Selects only from the top fraction of the population.
-    This is deterministic and provides strong selection pressure.
+    This provides strong selection pressure.
     
     Args:
         truncation_ratio: Fraction of population to select from (0, 1].
-        differentiable: If True, use softmax over truncated population.
+        adaptive: If True, use softmax over truncated population.
         temperature: Temperature for soft selection.
         learn_temperature: If True, temperature is learnable.
         minimize: If True, lower fitness is better.
@@ -609,13 +820,13 @@ class TruncationSelection(Selection):
     def __init__(
         self,
         truncation_ratio: float = 0.5,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
     ) -> None:
         super().__init__(
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -645,12 +856,16 @@ class TruncationSelection(Selection):
         # Get indices of top individuals
         _, top_indices = torch.topk(scores, n_truncated)
         
-        if self.differentiable:
+        if self.adaptive:
             # Soft selection within truncated set
             top_scores = scores[top_indices]
             logits = top_scores.unsqueeze(0).expand(n_select, -1)
             
-            weights = gumbel_softmax(logits, dim=-1)
+            weights = gumbel_softmax(
+                logits, 
+                temperature=self.temperature,  # Pass temperature
+                dim=-1
+            )
             
             top_pop = population[top_indices]
             selected = torch.matmul(weights, top_pop)
@@ -669,7 +884,7 @@ class TruncationSelection(Selection):
         return (
             f"TruncationSelection("
             f"truncation_ratio={self.truncation_ratio}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -686,7 +901,7 @@ class StochasticUniversalSampling(Selection):
     sampling of fit individuals.
     
     Args:
-        differentiable: If True, use Gumbel-Softmax approximation.
+        adaptive: If True, use Gumbel-Softmax approximation.
         temperature: Temperature for Gumbel-Softmax.
         learn_temperature: If True, temperature is learnable.
         minimize: If True, lower fitness is better.
@@ -699,14 +914,14 @@ class StochasticUniversalSampling(Selection):
     
     def __init__(
         self,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
         eps: float = 1e-10,
     ) -> None:
         super().__init__(
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -729,12 +944,16 @@ class StochasticUniversalSampling(Selection):
         shifted_scores = scores - scores.min() + self.eps
         total = shifted_scores.sum()
         
-        if self.differentiable:
+        if self.adaptive:
             # Fall back to Gumbel-Softmax (SUS is inherently discrete)
             logits = torch.log(shifted_scores + self.eps)
             logits_expanded = logits.unsqueeze(0).expand(n_select, -1)
             
-            weights = gumbel_softmax(logits_expanded, dim=-1)
+            weights = gumbel_softmax(
+                logits_expanded, 
+                temperature=self.temperature,  # Pass temperature
+                dim=-1
+            )
             selected = torch.matmul(weights, population)
             indices = weights.argmax(dim=-1)
         else:
@@ -764,5 +983,5 @@ class StochasticUniversalSampling(Selection):
     def __repr__(self) -> str:
         return (
             f"StochasticUniversalSampling("
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )

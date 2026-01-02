@@ -4,7 +4,7 @@ Crossover operators for recombination.
 This module provides crossover (recombination) operators that
 combine genetic information from parent individuals to create
 offspring. All operators support both classical and differentiable
-modes.
+(i.e., adaptive) modes.
 
 Available crossovers:
     - SBXCrossover: Simulated Binary Crossover (GA)
@@ -16,7 +16,7 @@ Available crossovers:
     - NPointCrossover: N-point crossover
 
 Differentiable Mode:
-    When `differentiable=True`, crossover masks use Binary-Concrete
+    When `adaptive=True`, crossover masks use Binary-Concrete
     (Gumbel-Sigmoid) relaxation with straight-through estimator,
     allowing gradients to flow through crossover decisions.
 
@@ -55,7 +55,7 @@ Example:
     >>> crossover = SBXCrossover(
     ...     eta=15,
     ...     prob=0.9,
-    ...     differentiable=True,
+    ...     adaptive=True,
     ...     learn_eta=True,
     ... )
     >>> offspring = crossover(parent1, parent2)
@@ -66,6 +66,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional, Tuple, Union
 
+import math
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -97,7 +98,7 @@ class Crossover(nn.Module, ABC):
     
     Args:
         prob: Crossover probability (per individual or per gene).
-        differentiable: If True, use Binary-Concrete for soft masks.
+        adaptive: If True, use Binary-Concrete for soft masks.
         temperature: Temperature for Binary-Concrete.
         learn_temperature: If True, temperature is learnable.
         learn_prob: If True, crossover probability is learnable.
@@ -119,7 +120,7 @@ class Crossover(nn.Module, ABC):
     def __init__(
         self,
         prob: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         learn_prob: bool = True,
@@ -127,11 +128,14 @@ class Crossover(nn.Module, ABC):
     ) -> None:
         super().__init__()
         
-        self.differentiable = differentiable
+        self._MIN_TEMPERATURE = 0.05
+        self._MAX_TEMPERATURE = 10.0
+        
+        self.adaptive = adaptive
         self.n_var = n_var
         
         # Temperature parameter (log for positivity)
-        if learn_temperature and differentiable:
+        if learn_temperature and adaptive:
             self._log_temperature = nn.Parameter(
                 torch.tensor(temperature).log()
             )
@@ -143,7 +147,7 @@ class Crossover(nn.Module, ABC):
         
         # Crossover probability as logits
         prob_logit = self._prob_to_logit(prob)
-        if learn_prob and differentiable:
+        if learn_prob and adaptive:
             if n_var is not None:
                 # Per-gene probability
                 self.prob_logits = nn.Parameter(
@@ -187,6 +191,14 @@ class Crossover(nn.Module, ABC):
             # Scalar -> expand to n_var
             return logits.expand(n_var)
         return logits
+    
+    def _clamp_temperature(self):
+        if hasattr(self, "_log_temperature") and self._log_temperature is not None:
+            with torch.no_grad():
+                self._log_temperature.clamp_(
+                    math.log(self._MIN_TEMPERATURE),
+                    math.log(self._MAX_TEMPERATURE),
+                )
             
     @abstractmethod
     def _crossover(
@@ -243,6 +255,8 @@ class Crossover(nn.Module, ABC):
             >>> # Per-gene eta override
             >>> offspring = crossover(parent1, parent2, eta=eta_per_gene)
         """
+        
+        self._clamp_temperature()
         return self._crossover(parent1, parent2, **kwargs)
     
     def __call__(
@@ -274,7 +288,7 @@ class SBXCrossover(Crossover):
     Args:
         eta: Distribution index (higher = tighter spread).
         prob: Crossover probability per gene.
-        differentiable: If True, use Binary-Concrete masks.
+        adaptive: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
         learn_eta: If True, eta is learnable.
         learn_prob: If True, crossover probability is learnable.
@@ -302,7 +316,7 @@ class SBXCrossover(Crossover):
         self,
         eta: float = 15.0,
         prob: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_eta: bool = True,
         learn_prob: bool = True,
@@ -310,7 +324,7 @@ class SBXCrossover(Crossover):
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_prob,
@@ -318,7 +332,7 @@ class SBXCrossover(Crossover):
         )
         
         # Eta parameter (log for positivity)
-        if learn_eta and differentiable:
+        if learn_eta and adaptive:
             self._log_eta = nn.Parameter(torch.tensor(eta).log())
         else:
             self.register_buffer("_log_eta", torch.tensor(eta).log())
@@ -359,10 +373,13 @@ class SBXCrossover(Crossover):
         prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
         
         # Get crossover mask (which genes to cross)
-        if self.differentiable:
+        if self.adaptive:
             # Convert prob to logits for Binary-Concrete
             prob_logits = torch.logit(prob_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(prob_logits)
+            mask = binary_concrete(
+                prob_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             # Hard Bernoulli mask
             mask = (torch.rand(n_pairs, n_var, device=device) < prob_expanded).float()
@@ -389,7 +406,7 @@ class SBXCrossover(Crossover):
             f"SBXCrossover("
             f"eta={self.eta.item():.2f}, "
             f"prob={self.prob.mean().item():.3f}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -411,7 +428,7 @@ class BlendCrossover(Crossover):
     Args:
         alpha: Extension factor for the interval.
         prob: Crossover probability (per individual).
-        differentiable: If True, use soft interpolation.
+        adaptive: If True, use soft interpolation.
         learn_alpha: If True, alpha is learnable.
     
     Per-Individual/Per-Gene Parameters:
@@ -436,12 +453,12 @@ class BlendCrossover(Crossover):
         self,
         alpha: float = 0.5,
         prob: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         learn_alpha: bool = True,
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=1.0,
             learn_temperature=False,
             learn_prob=False,
@@ -452,7 +469,7 @@ class BlendCrossover(Crossover):
         # alpha = 2 * sigmoid(logit), so logit = logit(alpha/2)
         alpha_logit = torch.logit(torch.tensor(alpha / 2.0).clamp(1e-7, 1 - 1e-7))
         
-        if learn_alpha and differentiable:
+        if learn_alpha and adaptive:
             self._alpha_logit = nn.Parameter(alpha_logit)
         else:
             self.register_buffer("_alpha_logit", alpha_logit)
@@ -506,7 +523,7 @@ class BlendCrossover(Crossover):
         offspring = lower + u * (upper - lower)
         
         # Apply crossover probability (per individual, use first column)
-        if not self.differentiable:
+        if not self.adaptive:
             do_cross = (torch.rand(n_pairs, 1, device=device) < prob_expanded[:, :1]).float()
             offspring = do_cross * offspring + (1 - do_cross) * parent1
         
@@ -534,7 +551,7 @@ class BinomialCrossover(Crossover):
     
     Args:
         cr: Crossover rate (probability of taking donor gene).
-        differentiable: If True, use Binary-Concrete masks.
+        adaptive: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
         learn_cr: If True, crossover rate is learnable.
         n_var: Number of variables (for per-gene CR).
@@ -565,14 +582,14 @@ class BinomialCrossover(Crossover):
     def __init__(
         self,
         cr: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_cr: bool = True,
         n_var: Optional[int] = None,
     ) -> None:
         super().__init__(
             prob=cr,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_cr,
@@ -609,10 +626,13 @@ class BinomialCrossover(Crossover):
         # Expand CR to [N, D]
         cr_expanded = expand_param(cr, self.cr, n_pairs, n_var, device, dtype)
         
-        if self.differentiable:
+        if self.adaptive:
             # Convert CR to logits for Binary-Concrete
             cr_logits = torch.logit(cr_expanded.clamp(1e-7, 1 - 1e-7))
-            mask = binary_concrete(cr_logits)
+            mask = binary_concrete(
+                cr_logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             # Hard Bernoulli mask
             mask = (torch.rand(n_pairs, n_var, device=device) < cr_expanded).float()
@@ -630,7 +650,7 @@ class BinomialCrossover(Crossover):
         return (
             f"BinomialCrossover("
             f"cr={self.cr.mean().item():.3f}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -648,7 +668,7 @@ class ExponentialCrossover(Crossover):
     
     Args:
         cr: Crossover rate (probability of extending segment).
-        differentiable: If True, use soft approximation.
+        adaptive: If True, use soft approximation.
         temperature: Temperature for soft crossover.
         learn_cr: If True, crossover rate is learnable.
     
@@ -673,13 +693,13 @@ class ExponentialCrossover(Crossover):
     def __init__(
         self,
         cr: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_cr: bool = True,
     ) -> None:
         super().__init__(
             prob=cr,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=learn_cr,
@@ -755,7 +775,7 @@ class ExponentialCrossover(Crossover):
         mask = torch.zeros_like(segment)
         mask.scatter_(1, indices, segment)
         
-        if not self.differentiable:
+        if not self.adaptive:
             # Hard mask
             mask = mask.detach()
         
@@ -768,7 +788,7 @@ class ExponentialCrossover(Crossover):
         return (
             f"ExponentialCrossover("
             f"cr={self.cr.item():.3f}, "
-            f"differentiable={self.differentiable})"
+            f"adaptive={self.adaptive})"
         )
 
 
@@ -786,7 +806,7 @@ class UniformCrossover(Crossover):
     
     Args:
         prob: Probability of crossover occurring per individual.
-        differentiable: If True, use Binary-Concrete masks.
+        adaptive: If True, use Binary-Concrete masks.
         temperature: Temperature for Binary-Concrete.
     
     Per-Individual/Per-Gene Parameters:
@@ -801,12 +821,12 @@ class UniformCrossover(Crossover):
     def __init__(
         self,
         prob: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=False,
@@ -836,10 +856,13 @@ class UniformCrossover(Crossover):
         dtype = parent1.dtype
         
         # 50-50 mask for each gene
-        if self.differentiable:
+        if self.adaptive:
             # Binary-Concrete with logits=0 (p=0.5)
             logits = torch.zeros(n_pairs, n_var, device=device)
-            mask = binary_concrete(logits)
+            mask = binary_concrete(
+                logits, 
+                temperature=self.temperature  # Pass temperature
+            )
         else:
             mask = (torch.rand(n_pairs, n_var, device=device) < 0.5).float()
         
@@ -847,7 +870,7 @@ class UniformCrossover(Crossover):
         offspring = mask * parent1 + (1.0 - mask) * parent2
         
         # Apply per-individual crossover probability
-        if not self.differentiable:
+        if not self.adaptive:
             # Expand prob to [N, D]
             prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
             do_cross = (torch.rand(n_pairs, 1, device=device) < prob_expanded[:, :1]).float()
@@ -875,7 +898,7 @@ class ArithmeticCrossover(Crossover):
             from [0, 1] for each crossover.
         whole: If True, same alpha for all genes. If False,
             different alpha per gene.
-        differentiable: If True, alpha is learnable.
+        adaptive: If True, alpha is learnable.
         learn_alpha: If True, alpha is a learnable parameter.
     
     Per-Individual/Per-Gene Parameters:
@@ -896,12 +919,12 @@ class ArithmeticCrossover(Crossover):
         self,
         alpha: Optional[float] = 0.5,
         whole: bool = True,
-        differentiable: bool = False,
+        adaptive: bool = False,
         learn_alpha: bool = True,
     ) -> None:
         super().__init__(
             prob=1.0,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=1.0,
             learn_temperature=False,
             learn_prob=False,
@@ -915,7 +938,7 @@ class ArithmeticCrossover(Crossover):
             # Alpha as sigmoid(logit) to keep in [0, 1]
             alpha_logit = torch.logit(torch.tensor(alpha).clamp(1e-7, 1 - 1e-7))
             
-            if learn_alpha and differentiable:
+            if learn_alpha and adaptive:
                 self._alpha_logit = nn.Parameter(alpha_logit)
             else:
                 self.register_buffer("_alpha_logit", alpha_logit)
@@ -995,7 +1018,7 @@ class NPointCrossover(Crossover):
         n_points: Number of crossover points (1 for single-point,
             2 for two-point, etc.).
         prob: Crossover probability per individual.
-        differentiable: If True, use soft masks.
+        adaptive: If True, use soft masks.
         temperature: Temperature for soft crossover.
     
     Per-Individual/Per-Gene Parameters:
@@ -1016,12 +1039,12 @@ class NPointCrossover(Crossover):
         self,
         n_points: int = 1,
         prob: float = 0.9,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
     ) -> None:
         super().__init__(
             prob=prob,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
             learn_prob=False,
@@ -1073,7 +1096,7 @@ class NPointCrossover(Crossover):
         offspring = mask * parent1 + (1.0 - mask) * parent2
         
         # Apply per-individual crossover probability
-        if not self.differentiable:
+        if not self.adaptive:
             # Expand prob to [N, D]
             prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
             do_cross = (torch.rand(n_pairs, 1, device=device) < prob_expanded[:, :1]).float()

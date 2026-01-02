@@ -3,7 +3,7 @@ Survival selection operators for generational replacement.
 
 This module provides strategies for selecting which individuals
 survive to the next generation. All operators support both classical
-and differentiable modes.
+and differentiable (i.e., adaptive) modes.
 
 Available survival strategies:
     - MergeSurvival: (μ+λ) - Select best from parents + offspring
@@ -18,9 +18,11 @@ Elitism:
     preserved in the next generation.
 
 Differentiable Mode:
-    When `differentiable=True`, survival selection uses soft ranking
-    based on fitness scores, allowing gradients to flow through the
-    selection process via weighted combinations.
+    When `adaptive=True`, survival selection uses soft ranking
+    based on fitness scores with temperature-scaled softmax,
+    if and only if another operators has `adaptive=True`,
+    allowing gradients to flow through the selection process
+    via the temperature parameter using straight-through estimator.
 
 Example:
     >>> from evograd.operators import MergeSurvival
@@ -35,7 +37,7 @@ Example:
     >>> # Differentiable mode
     >>> survival = MergeSurvival(
     ...     n_survive=100,
-    ...     differentiable=True,
+    ...     adaptive=True,
     ...     temperature=1.0,
     ... )
 """
@@ -43,11 +45,13 @@ Example:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+
+from evograd.operators.selection import TopKSelection
 
 __all__ = [
     "Survival",
@@ -77,7 +81,7 @@ class Survival(nn.Module, ABC):
         n_survive: Number of individuals to survive (population size).
         elitism: If True, preserve best individuals from parents.
         n_elite: Number of elite individuals to preserve.
-        differentiable: If True, use soft selection for gradients.
+        adaptive: If True, use soft selection for gradients.
         temperature: Temperature for soft selection.
         learn_temperature: If True, temperature is learnable.
         minimize: If True, lower fitness is better (default).
@@ -88,7 +92,7 @@ class Survival(nn.Module, ABC):
         n_survive: Optional[int] = None,
         elitism: bool = True,
         n_elite: int = 1,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
@@ -98,11 +102,11 @@ class Survival(nn.Module, ABC):
         self.n_survive = n_survive
         self.elitism = elitism
         self.n_elite = n_elite if elitism else 0
-        self.differentiable = differentiable
+        self.adaptive = adaptive
         self.minimize = minimize
         
         # Temperature parameter for soft selection
-        if learn_temperature and differentiable:
+        if learn_temperature and adaptive:
             self._log_temperature = nn.Parameter(
                 torch.tensor(temperature).log()
             )
@@ -138,25 +142,127 @@ class Survival(nn.Module, ABC):
         else:
             return fitness
     
-    def _soft_rank_weights(self, fitness: Tensor, n_select: int) -> Tensor:
+    def _compute_soft_weights(self, fitness: Tensor) -> Tensor:
         """
-        Compute soft ranking weights for differentiable selection.
-        
-        Uses softmax over fitness scores to create a probability
-        distribution, then weights individuals accordingly.
+        Compute soft selection weights using temperature-scaled softmax.
         
         Args:
             fitness: Fitness values [n].
-            n_select: Number to select.
         
         Returns:
-            Selection weights [n] summing to n_select.
+            Soft selection weights [n] summing to 1.
         """
         scores = self._fitness_to_scores(fitness)
-        probs = torch.softmax(scores / self.temperature, dim=0)
-        return probs * n_select
+        return torch.softmax(scores / self.temperature, dim=0)
     
-    @abstractmethod
+
+
+    # -------------------------------------------------------------------------
+    # Shared Utilities
+    # -------------------------------------------------------------------------
+
+    def _best_indices(self, fitness: Tensor, k: int) -> Tensor:
+        """
+        Indices of the best k individuals according to `minimize`.
+
+        Uses score-space (higher = better) so it works for both minimization
+        and maximization.
+        """
+        return TopKSelection.best_indices(fitness, k, minimize=self.minimize)
+
+    def _worst_indices(self, fitness: Tensor, k: int) -> Tensor:
+        """
+        Indices of the worst k individuals according to `minimize`.
+
+        Uses score-space (higher = better) so it works for both minimization
+        and maximization.
+        """
+        return TopKSelection.worst_indices(fitness, k, minimize=self.minimize)
+
+    def _sort_indices_best_first(self, fitness: Tensor) -> Tensor:
+        """Return indices that sort individuals from best to worst."""
+        return TopKSelection.sort_indices_best_first(fitness, minimize=self.minimize)
+
+    def _gumbel_topk(
+        self,
+        logits: Tensor,
+        k: int,
+        dim: int = 0,
+    ) -> Tensor:
+        """
+        Differentiable top-k without replacement using sequential Gumbel-Softmax.
+
+        Returns a stack of one-hot vectors (hard in forward, soft in backward)
+        with shape [k, n] (assuming `dim=0` / logits is 1D).
+        """
+        weights, _ = TopKSelection.gumbel_topk(
+            logits,
+            k,
+            temperature=self.temperature,
+            dim=dim,
+            eps=eps,
+        )
+        return weights
+
+    def _adaptive_topk_select(
+        self,
+        population: Tensor,
+        fitness: Tensor,
+        k: int,
+        mask_out: Optional[Tensor] = None,
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Adaptive (differentiable) top-k selection with straight-through gradients.
+
+        Args:
+            population: Candidate individuals [n, n_var].
+            fitness: Candidate fitness [n].
+            k: Number to select.
+            mask_out: Optional boolean mask [n] of candidates to exclude.
+
+        Returns:
+            survivors: Selected individuals [k, n_var].
+            survivor_fit: Selected fitness [k].
+        """
+        n = population.shape[0]
+        if k <= 0:
+            raise ValueError(f"k must be > 0, got {k}")
+        if k > n:
+            raise ValueError(f"Cannot select k={k} from n={n}")
+
+        # Convert fitness to score-space (higher is better)
+        scores = self._fitness_to_scores(fitness)
+
+        # Optional masking (e.g., to exclude elites when selecting the remainder)
+        logits = scores.unsqueeze(0)  # [1, n]
+        if mask_out is not None:
+            if mask_out.dtype != torch.bool:
+                raise TypeError("mask_out must be a boolean tensor")
+            if mask_out.shape[0] != n:
+                raise ValueError(f"mask_out must have shape [{n}], got {tuple(mask_out.shape)}")
+            logits = logits.clone()
+            logits[:, mask_out] = -1e9
+
+        # Sequential (without-replacement) ST Gumbel top-k
+        weights, idx = TopKSelection.gumbel_topk(
+            logits,
+            k=k,
+            temperature=self.temperature,
+            dim=-1,
+        )
+
+        # weights: [1, k, n] -> [k, n]
+        weights = weights.squeeze(0)
+
+        selected = weights @ population  # [k, n_var]
+
+        # Compute (soft) fitness values for the selected survivors.
+        # Forward pass is hard (one-hot) due to straight-through Gumbel-Softmax,
+        # backward pass carries gradients through the soft weights.
+        selected_fit = weights @ fitness  # [k]
+
+        return selected, selected_fit
+
     def _survive(
         self,
         parents: Tensor,
@@ -245,7 +351,7 @@ class MergeSurvival(Survival):
         n_survive: Number of individuals to survive.
         elitism: If True, preserve best parents (default: True).
         n_elite: Number of elite parents to preserve.
-        differentiable: If True, use soft weighted selection.
+        adaptive: If True, use soft weighted selection.
         temperature: Temperature for soft selection.
         minimize: If True, lower fitness is better.
     
@@ -264,8 +370,8 @@ class MergeSurvival(Survival):
     ) -> Tuple[Tensor, Tensor]:
         """Select best from combined population."""
         
-        if self.differentiable:
-            return self._survive_differentiable(
+        if self.adaptive:
+            return self._survive_adaptive(
                 parents, parent_fitness,
                 offspring, offspring_fitness,
                 n_survive,
@@ -286,12 +392,11 @@ class MergeSurvival(Survival):
         n_survive: int,
     ) -> Tuple[Tensor, Tensor]:
         """Hard (classical) survival selection."""
-        device = parents.device
         
         # Handle elitism first
         if self.elitism and self.n_elite > 0:
             # Get elite from parents
-            elite_idx = torch.argsort(parent_fitness)[:self.n_elite]
+            elite_idx = self._best_indices(parent_fitness, self.n_elite)
             elite_pop = parents[elite_idx].clone()
             elite_fit = parent_fitness[elite_idx].clone()
             
@@ -301,24 +406,24 @@ class MergeSurvival(Survival):
             
             # Select remaining slots
             n_remaining = n_survive - self.n_elite
-            sorted_idx = torch.argsort(combined_fit)[:n_remaining]
+            sorted_idx = self._best_indices(combined_fit, n_remaining)
             
             # Combine elite + selected
             survivors = torch.cat([elite_pop, combined_pop[sorted_idx]], dim=0)
             survivor_fit = torch.cat([elite_fit, combined_fit[sorted_idx]], dim=0)
             
             # Re-sort by fitness
-            final_idx = torch.argsort(survivor_fit)
+            final_idx = self._sort_indices_best_first(survivor_fit)
             return survivors[final_idx], survivor_fit[final_idx]
         else:
             # Simple selection from combined
             combined_pop = torch.cat([parents, offspring], dim=0)
             combined_fit = torch.cat([parent_fitness, offspring_fitness], dim=0)
             
-            sorted_idx = torch.argsort(combined_fit)[:n_survive]
+            sorted_idx = self._best_indices(combined_fit, n_survive)
             return combined_pop[sorted_idx], combined_fit[sorted_idx]
     
-    def _survive_differentiable(
+    def _survive_adaptive(
         self,
         parents: Tensor,
         parent_fitness: Tensor,
@@ -326,40 +431,62 @@ class MergeSurvival(Survival):
         offspring_fitness: Tensor,
         n_survive: int,
     ) -> Tuple[Tensor, Tensor]:
-        """Soft (differentiable) survival selection."""
+        """
+        Soft (differentiable/adaptive) survival selection.
+
+        Uses straight-through estimator via Gumbel-Softmax:
+        - Forward pass: discrete top-k without replacement
+        - Backward pass: soft gradients flow through temperature
+
+        Note: Elitism (if enabled) is applied as a hard constraint by first
+        preserving elite parents, then selecting the remaining survivors from
+        the remaining candidate pool.
+        """
         # Combine populations
         combined_pop = torch.cat([parents, offspring], dim=0)
         combined_fit = torch.cat([parent_fitness, offspring_fitness], dim=0)
-        
-        # Get soft weights
-        weights = self._soft_rank_weights(combined_fit, n_survive)
-        
-        # Weighted average for differentiability
-        # This creates a "soft" population that maintains gradient flow
-        weights_norm = weights / weights.sum()
-        
-        # For now, use hard selection but with straight-through gradient
-        sorted_idx = torch.argsort(combined_fit)[:n_survive]
-        survivors = combined_pop[sorted_idx]
-        survivor_fit = combined_fit[sorted_idx]
-        
-        # Apply elitism
-        if self.elitism and self.n_elite > 0:
-            elite_idx = torch.argsort(parent_fitness)[:self.n_elite]
-            elite_pop = parents[elite_idx]
-            elite_fit = parent_fitness[elite_idx]
-            
-            # Ensure elites are in the survivor set
-            n_remaining = n_survive - self.n_elite
-            survivors = torch.cat([elite_pop, survivors[:n_remaining]], dim=0)
-            survivor_fit = torch.cat([elite_fit, survivor_fit[:n_remaining]], dim=0)
-            
-            final_idx = torch.argsort(survivor_fit)
-            survivors = survivors[final_idx]
-            survivor_fit = survivor_fit[final_idx]
-        
-        return survivors, survivor_fit
 
+        # Handle elitism first (hard constraint)
+        if self.elitism and self.n_elite > 0:
+            n_elite = min(self.n_elite, parents.shape[0], n_survive)
+            elite_idx = self._best_indices(parent_fitness, n_elite)
+            elite_pop = parents[elite_idx].clone()
+            elite_fit = parent_fitness[elite_idx].clone()
+
+            n_remaining = n_survive - n_elite
+            if n_remaining <= 0:
+                # Sort best-first for consistency
+                final_idx = self._sort_indices_best_first(elite_fit)
+                return elite_pop[final_idx], elite_fit[final_idx]
+
+            # Mask out elites in the combined candidate pool to avoid duplicates
+            mask_out = torch.zeros(combined_fit.shape[0], dtype=torch.bool, device=combined_fit.device)
+            mask_out[elite_idx] = True  # elite indices refer to parents, which occupy the first block in combined
+
+            survivors_rest, fit_rest = self._adaptive_topk_select(
+                combined_pop,
+                combined_fit,
+                k=n_remaining,
+                mask_out=mask_out,
+            )
+
+            survivors = torch.cat([elite_pop, survivors_rest], dim=0)
+            survivor_fit = torch.cat([elite_fit, fit_rest], dim=0)
+
+            # Re-sort by fitness (best first)
+            final_idx = self._sort_indices_best_first(survivor_fit)
+            return survivors[final_idx], survivor_fit[final_idx]
+
+        # No elitism: select directly from combined
+        survivors, survivor_fit = self._adaptive_topk_select(
+            combined_pop,
+            combined_fit,
+            k=n_survive,
+        )
+
+        # Re-sort by fitness (best first)
+        final_idx = self._sort_indices_best_first(survivor_fit)
+        return survivors[final_idx], survivor_fit[final_idx]
 
 # =============================================================================
 # Comma Survival (μ,λ)
@@ -380,7 +507,7 @@ class CommaSurvival(Survival):
         n_survive: Number of individuals to survive.
         elitism: If True, preserve best parents (recommended).
         n_elite: Number of elite parents to preserve.
-        differentiable: If True, use soft selection.
+        adaptive: If True, use soft selection.
         temperature: Temperature for soft selection.
         minimize: If True, lower fitness is better.
     
@@ -413,14 +540,31 @@ class CommaSurvival(Survival):
                 f"got {n_offspring}. Increase n_offsprings or reduce n_survive."
             )
         
-        # Select best from offspring
-        sorted_idx = torch.argsort(offspring_fitness)[:n_from_offspring]
-        survivors = offspring[sorted_idx]
-        survivor_fit = offspring_fitness[sorted_idx]
+        if self.adaptive:
+            # Soft selection with gradient through temperature
+            #
+            # Use straight-through Gumbel-Softmax top-k without replacement so:
+            # - forward is discrete (hard survivors)
+            # - backward carries gradients through temperature
+            hard_survivors, hard_fit = self._adaptive_topk_select(
+                offspring,
+                offspring_fitness,
+                k=n_from_offspring,
+            )
+
+            # Re-sort by fitness (best first)
+            final_idx = self._sort_indices_best_first(hard_fit)
+            survivors = hard_survivors[final_idx]
+            survivor_fit = hard_fit[final_idx]
+        else:
+            # Hard selection from offspring
+            sorted_idx = self._best_indices(offspring_fitness, n_from_offspring)
+            survivors = offspring[sorted_idx]
+            survivor_fit = offspring_fitness[sorted_idx]
         
         # Add elites from parents
         if self.elitism and self.n_elite > 0:
-            elite_idx = torch.argsort(parent_fitness)[:self.n_elite]
+            elite_idx = self._best_indices(parent_fitness, self.n_elite)
             elite_pop = parents[elite_idx].clone()
             elite_fit = parent_fitness[elite_idx].clone()
             
@@ -428,7 +572,7 @@ class CommaSurvival(Survival):
             survivor_fit = torch.cat([elite_fit, survivor_fit], dim=0)
             
             # Re-sort
-            final_idx = torch.argsort(survivor_fit)
+            final_idx = self._sort_indices_best_first(survivor_fit)
             survivors = survivors[final_idx]
             survivor_fit = survivor_fit[final_idx]
         
@@ -458,7 +602,7 @@ class ReplaceWorstSurvival(Survival):
         elitism: If True, best parent is never replaced.
         n_elite: Number of protected parents.
         replacement: Pairing strategy ('worst' or 'random').
-        differentiable: If True, use soft replacement.
+        adaptive: If True, use soft replacement.
         temperature: Temperature for soft selection.
         minimize: If True, lower fitness is better.
     
@@ -474,7 +618,7 @@ class ReplaceWorstSurvival(Survival):
         elitism: bool = True,
         n_elite: int = 1,
         replacement: str = 'worst',
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
@@ -483,7 +627,7 @@ class ReplaceWorstSurvival(Survival):
             n_survive=n_survive,
             elitism=elitism,
             n_elite=n_elite,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -513,13 +657,14 @@ class ReplaceWorstSurvival(Survival):
         # Get indices of worst parents (candidates for replacement)
         if self.replacement == 'worst':
             # Sort by fitness descending (worst first)
-            worst_idx = torch.argsort(parent_fitness, descending=True)
+            # Sort by score ascending (worst first)
+            worst_idx = self._sort_indices_best_first(parent_fitness).flip(0)
         else:  # random
             worst_idx = torch.randperm(n_parents, device=parents.device)
         
         # Protect elites
         if self.elitism and self.n_elite > 0:
-            elite_idx = set(torch.argsort(parent_fitness)[:self.n_elite].tolist())
+            elite_idx = set(self._best_indices(parent_fitness, self.n_elite).tolist())
             # Filter out elite indices
             worst_idx = torch.tensor(
                 [i for i in worst_idx.tolist() if i not in elite_idx],
@@ -527,23 +672,51 @@ class ReplaceWorstSurvival(Survival):
             )
         
         # Sort offspring by fitness (best first)
-        best_offspring_idx = torch.argsort(offspring_fitness)
+        best_offspring_idx = self._sort_indices_best_first(offspring_fitness)
         
         # Replace worst with better offspring
         n_replace = min(len(worst_idx), n_offspring)
-        for i in range(n_replace):
-            parent_idx = worst_idx[i]
-            off_idx = best_offspring_idx[i]
+        
+        if self.adaptive and n_replace > 0:
+            # Create gradient carrier using all fitness values
+            all_fit = torch.cat([parent_fitness, offspring_fitness])
+            scores = self._fitness_to_scores(all_fit)
+            soft_probs = torch.softmax(scores / self.temperature, dim=0)
+            soft_weighted_fit = torch.sum(soft_probs * all_fit)
+            fit_gradient_carrier = soft_weighted_fit - soft_weighted_fit.detach()
             
-            # Only replace if offspring is better
-            if self.minimize:
-                should_replace = offspring_fitness[off_idx] < survivor_fit[parent_idx]
-            else:
-                should_replace = offspring_fitness[off_idx] > survivor_fit[parent_idx]
+            # Soft replacement with gradient flow
+            for i in range(n_replace):
+                parent_idx = worst_idx[i]
+                off_idx = best_offspring_idx[i]
+                
+                # Hard decision
+                if self.minimize:
+                    should_replace = offspring_fitness[off_idx] < survivor_fit[parent_idx]
+                else:
+                    should_replace = offspring_fitness[off_idx] > survivor_fit[parent_idx]
+                
+                if should_replace:
+                    survivors[parent_idx] = offspring[off_idx]
+                    survivor_fit[parent_idx] = offspring_fitness[off_idx]
             
-            if should_replace:
-                survivors[parent_idx] = offspring[off_idx]
-                survivor_fit[parent_idx] = offspring_fitness[off_idx]
+            # Add gradient carrier to all fitness values
+            survivor_fit = survivor_fit + fit_gradient_carrier
+        else:
+            # Hard replacement
+            for i in range(n_replace):
+                parent_idx = worst_idx[i]
+                off_idx = best_offspring_idx[i]
+                
+                # Only replace if offspring is better
+                if self.minimize:
+                    should_replace = offspring_fitness[off_idx] < survivor_fit[parent_idx]
+                else:
+                    should_replace = offspring_fitness[off_idx] > survivor_fit[parent_idx]
+                
+                if should_replace:
+                    survivors[parent_idx] = offspring[off_idx]
+                    survivor_fit[parent_idx] = offspring_fitness[off_idx]
         
         return survivors, survivor_fit
 
@@ -563,7 +736,7 @@ class FitnessSurvival(Survival):
     
     Args:
         n_survive: Number of individuals to survive.
-        differentiable: If True, use soft selection.
+        adaptive: If True, use soft selection.
         temperature: Temperature for soft selection.
         minimize: If True, lower fitness is better.
     
@@ -575,7 +748,7 @@ class FitnessSurvival(Survival):
     def __init__(
         self,
         n_survive: Optional[int] = None,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
@@ -584,7 +757,7 @@ class FitnessSurvival(Survival):
             n_survive=n_survive,
             elitism=False,
             n_elite=0,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -603,8 +776,24 @@ class FitnessSurvival(Survival):
         combined_pop = torch.cat([parents, offspring], dim=0)
         combined_fit = torch.cat([parent_fitness, offspring_fitness], dim=0)
         
-        sorted_idx = torch.argsort(combined_fit)[:n_survive]
-        return combined_pop[sorted_idx], combined_fit[sorted_idx]
+        if self.adaptive:
+            # Soft selection with gradient through temperature
+            #
+            # Use straight-through Gumbel-Softmax top-k without replacement so:
+            # - forward is discrete (hard survivors)
+            # - backward carries gradients through temperature
+            survivors, survivor_fit = self._adaptive_topk_select(
+                combined_pop,
+                combined_fit,
+                k=n_survive,
+            )
+
+            # Re-sort by fitness (best first)
+            final_idx = self._sort_indices_best_first(survivor_fit)
+            return survivors[final_idx], survivor_fit[final_idx]
+        else:
+            sorted_idx = self._best_indices(combined_fit, n_survive)
+            return combined_pop[sorted_idx], combined_fit[sorted_idx]
 
 
 # =============================================================================
@@ -625,7 +814,7 @@ class AgeSurvival(Survival):
         max_age: Maximum age before forced replacement.
         elitism: If True, preserve best regardless of age.
         n_elite: Number of age-exempt elite individuals.
-        differentiable: If True, use soft selection.
+        adaptive: If True, use soft selection.
         temperature: Temperature for soft selection.
         minimize: If True, lower fitness is better.
     
@@ -645,7 +834,7 @@ class AgeSurvival(Survival):
         max_age: int = 10,
         elitism: bool = True,
         n_elite: int = 1,
-        differentiable: bool = False,
+        adaptive: bool = False,
         temperature: float = 1.0,
         learn_temperature: bool = True,
         minimize: bool = True,
@@ -654,7 +843,7 @@ class AgeSurvival(Survival):
             n_survive=n_survive,
             elitism=elitism,
             n_elite=n_elite,
-            differentiable=differentiable,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=learn_temperature,
             minimize=minimize,
@@ -703,28 +892,40 @@ class AgeSurvival(Survival):
         age_norm = ages / (self.max_age + 1)
         composite = 0.7 * fit_norm + 0.3 * age_norm
         
+        if self.adaptive:
+            # Soft selection based on composite score (lower = better, so negate)
+            scores = -composite  # higher = better
+
+            # Straight-through Gumbel-Softmax top-k without replacement
+            W = self._gumbel_topk(scores, k=n_survive, dim=0)  # [n_survive, n_total]
+            survivors = W @ combined_pop
+            survivor_fit = W @ combined_fit
+
+            # Re-sort by actual fitness (best first) for consistent output ordering
+            final_idx = self._sort_indices_best_first(survivor_fit)
+            return survivors[final_idx], survivor_fit[final_idx]
+        else:
+            # Hard selection
+            sorted_idx = TopKSelection.best_indices(composite, k=n_survive, minimize=True)
+            survivors = combined_pop[sorted_idx]
+            survivor_fit = combined_fit[sorted_idx]
+        
         # Handle elitism
         if self.elitism and self.n_elite > 0:
-            elite_idx = torch.argsort(parent_fitness)[:self.n_elite]
+            elite_idx = self._best_indices(parent_fitness, self.n_elite)
             elite_pop = parents[elite_idx].clone()
             elite_fit = parent_fitness[elite_idx].clone()
             
-            # Select remaining
+            # Replace last n_elite survivors with elites
             n_remaining = n_survive - self.n_elite
-            sorted_idx = torch.argsort(composite)[:n_remaining]
+            survivors = torch.cat([elite_pop, survivors[:n_remaining]], dim=0)
+            survivor_fit = torch.cat([elite_fit, survivor_fit[:n_remaining]], dim=0)
             
-            survivors = torch.cat([elite_pop, combined_pop[sorted_idx]], dim=0)
-            survivor_fit = torch.cat([elite_fit, combined_fit[sorted_idx]], dim=0)
-            
-            final_idx = torch.argsort(survivor_fit)
-            return survivors[final_idx], survivor_fit[final_idx]
-        else:
-            sorted_idx = torch.argsort(composite)[:n_survive]
-            survivors = combined_pop[sorted_idx]
-            survivor_fit = combined_fit[sorted_idx]
-            
-            final_idx = torch.argsort(survivor_fit)
-            return survivors[final_idx], survivor_fit[final_idx]
+            final_idx = self._sort_indices_best_first(survivor_fit)
+            survivors = survivors[final_idx]
+            survivor_fit = survivor_fit[final_idx]
+        
+        return survivors, survivor_fit
 
 
 # =============================================================================
@@ -736,7 +937,7 @@ def get_survival(
     n_survive: Optional[int] = None,
     elitism: bool = True,
     n_elite: int = 1,
-    differentiable: bool = False,
+    adaptive: bool = False,
     **kwargs,
 ) -> Survival:
     """
@@ -752,7 +953,7 @@ def get_survival(
         n_survive: Number of individuals to survive.
         elitism: Whether to preserve best individuals.
         n_elite: Number of elite individuals.
-        differentiable: Enable gradient flow.
+        adaptive: Enable gradient flow.
         **kwargs: Additional arguments for specific strategies.
     
     Returns:
@@ -760,7 +961,7 @@ def get_survival(
     
     Example:
         >>> survival = get_survival('plus', n_survive=100, elitism=True)
-        >>> survival = get_survival('comma', n_survive=50, differentiable=True)
+        >>> survival = get_survival('comma', n_survive=50, adaptive=True)
     """
     strategy = strategy.lower().strip()
     
@@ -769,7 +970,7 @@ def get_survival(
             n_survive=n_survive,
             elitism=elitism,
             n_elite=n_elite,
-            differentiable=differentiable,
+            adaptive=adaptive,
             **kwargs,
         )
     elif strategy in ['comma', '(mu,lambda)', 'mu,lambda']:
@@ -777,7 +978,7 @@ def get_survival(
             n_survive=n_survive,
             elitism=elitism,
             n_elite=n_elite,
-            differentiable=differentiable,
+            adaptive=adaptive,
             **kwargs,
         )
     elif strategy in ['replace_worst', 'steady_state', 'steady-state']:
@@ -785,13 +986,13 @@ def get_survival(
             n_survive=n_survive,
             elitism=elitism,
             n_elite=n_elite,
-            differentiable=differentiable,
+            adaptive=adaptive,
             **kwargs,
         )
     elif strategy in ['fitness', 'truncation']:
         return FitnessSurvival(
             n_survive=n_survive,
-            differentiable=differentiable,
+            adaptive=adaptive,
             **kwargs,
         )
     elif strategy in ['age', 'age_based']:
@@ -799,7 +1000,7 @@ def get_survival(
             n_survive=n_survive,
             elitism=elitism,
             n_elite=n_elite,
-            differentiable=differentiable,
+            adaptive=adaptive,
             **kwargs,
         )
     else:

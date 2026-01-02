@@ -13,6 +13,7 @@ Functions:
 
 import torch
 from torch import Tensor
+from typing import Union
 
 __all__ = [
     "gumbel_softmax",
@@ -23,7 +24,7 @@ __all__ = [
 
 def gumbel_softmax(
     logits: Tensor,
-    temperature: float | Tensor = 1.0,
+    temperature: Union[float, Tensor] = 1.0,
     dim: int = -1,
     eps: float = 1e-10,
 ) -> Tensor:
@@ -65,7 +66,7 @@ def gumbel_softmax(
 
 def binary_concrete(
     logits: Tensor,
-    temperature: float | Tensor = 1.0,
+    temperature: Union[float, Tensor] = 1.0,
     eps: float = 1e-10,
 ) -> Tensor:
     """
@@ -103,8 +104,8 @@ def binary_concrete(
 
 
 def expand_param(
-    param: Tensor | float | None,
-    default: Tensor | float,
+    param: Union[Tensor, float, None],
+    default: Union[Tensor, float],
     n_pop: int,
     n_var: int,
     device: torch.device,

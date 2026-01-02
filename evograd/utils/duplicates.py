@@ -28,7 +28,7 @@ Example
 from __future__ import annotations
 
 from enum import Enum, auto
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 
@@ -70,8 +70,8 @@ class DuplicateEliminator:
     >>> new_pop = elim(pop, lower, upper)
 
     It does **not** touch fitness values or call the objective function.
-    Algorithms are expected to re-evaluate the entire population afterwards
-    if duplicates were replaced.
+    Algorithms should re-evaluate any individuals that were resampled (duplicates).
+    If you call this with `return_indices=True`, you can re-evaluate only those.
 
     Parameters
     ----------
@@ -117,7 +117,8 @@ class DuplicateEliminator:
         pop: torch.Tensor,
         lower: Union[float, torch.Tensor],
         upper: Union[float, torch.Tensor],
-    ) -> torch.Tensor:
+        return_indices: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Return a new population where duplicates have been resampled.
 
         Parameters
@@ -131,16 +132,18 @@ class DuplicateEliminator:
 
         Returns
         -------
-        torch.Tensor
-            Tensor of shape (N, D). If no duplicates are found or
-            `method` is NONE, returns `pop` unchanged (or a clone).
+        Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+            If `return_indices=False` (default), returns a tensor of shape (N, D).
+            If `return_indices=True`, returns (new_pop, changed_indices) where
+            `changed_indices` is a 1D int64 tensor containing the indices of
+            individuals that were resampled at least once.
         """
         # Reset statistics
         self.n_duplicates_found = 0
         self.n_duplicates_resolved = 0
 
         if self.method == DuplicateMethod.NONE:
-            return pop.clone()
+            return (pop.clone(), torch.empty(0, device=pop.device, dtype=torch.long)) if return_indices else pop.clone()
 
         if pop.ndim != 2:
             raise ValueError(f"Expected population of shape (N, D), got {tuple(pop.shape)}")
@@ -162,10 +165,11 @@ class DuplicateEliminator:
         self.n_duplicates_found = initial_dups
 
         if initial_dups == 0:
-            return pop.clone()
+            return (pop.clone(), torch.empty(0, device=pop.device, dtype=torch.long)) if return_indices else pop.clone()
 
         new_pop = pop.clone()
         dup_indices = dup_mask.nonzero(as_tuple=False).view(-1)
+        changed_indices = dup_indices.clone()
         span = ub - lb
 
         # Resample duplicates with multiple attempts
@@ -191,7 +195,7 @@ class DuplicateEliminator:
         final_dups = dup_indices.numel()
         self.n_duplicates_resolved = initial_dups - final_dups
 
-        return new_pop
+        return (new_pop, changed_indices) if return_indices else new_pop
 
     def find_duplicates(self, pop: torch.Tensor) -> torch.Tensor:
         """Find duplicate individuals in a population.
