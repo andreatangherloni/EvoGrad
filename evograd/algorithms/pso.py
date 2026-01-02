@@ -155,6 +155,7 @@ class PSO(Algorithm):
             eliminate_duplicates=False,
             n_offsprings=pop_size,
             differentiable=differentiable,
+            adaptive=adaptive,
             seed=seed,
             device=device,
             dtype=dtype,

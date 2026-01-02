@@ -221,6 +221,7 @@ class Algorithm(nn.Module, ABC):
         eliminate_duplicates: Union[bool, DuplicateEliminator] = True,
         n_offsprings: Optional[int] = None,
         differentiable: bool = True,
+        adaptive: bool = True,
         seed: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
@@ -244,6 +245,7 @@ class Algorithm(nn.Module, ABC):
         self.pop_size = pop_size
         self.n_offsprings = n_offsprings if n_offsprings is not None else pop_size
         self.differentiable = differentiable
+        self.adaptive = adaptive
         
         # Store operators (can be None for algorithms that don't use them)
         if sampling is None:
@@ -568,12 +570,20 @@ class Algorithm(nn.Module, ABC):
         
         # Now apply duplicate elimination (non-differentiable)
         if self.duplicate_eliminator is not None:
-            # Re-evaluate if duplicates were removed
-            n_before = offspring.shape[0]
-            offspring = self.duplicate_eliminator(offspring, self.xl, self.xu)
-            if offspring.shape[0] != n_before:
-                offspring_fitness = self._evaluate(offspring)
-                self.state.n_evals += offspring.shape[0]
+            # Duplicate elimination is non-differentiable. We can avoid
+            # a full re-evaluation by only re-evaluating individuals that
+            # were actually resampled.
+            offspring, changed_indices = self.duplicate_eliminator(
+                offspring, self.xl, self.xu, return_indices=True
+            )
+
+            if changed_indices.numel() > 0:
+                # Ensure we can assign into the fitness tensor safely.
+                offspring_fitness = offspring_fitness.clone()
+
+                changed_fitness = self._evaluate(offspring[changed_indices])
+                offspring_fitness[changed_indices] = changed_fitness
+                self.state.n_evals += int(changed_indices.numel())
         
         # Advance with pending offspring
         self._advance(offspring, offspring_fitness)
@@ -641,6 +651,7 @@ class Algorithm(nn.Module, ABC):
                 "pop_size": self.pop_size,
                 "n_offsprings": self.n_offsprings,
                 "differentiable": self.differentiable,
+                "adaptive": self.adaptive,
                 "seed": self._seed,
             },
             "is_initialized": self._is_initialized,
@@ -698,6 +709,7 @@ class Algorithm(nn.Module, ABC):
             f"  Population size: {self.pop_size}",
             f"  Offspring size: {self.n_offsprings}",
             f"  Mode: {'Differentiable' if self.differentiable else 'Classical'}",
+            f"  Adaptive: {self.adaptive}",
             f"  Device: {self.device}",
             f"  Initialized: {self._is_initialized}",
         ]

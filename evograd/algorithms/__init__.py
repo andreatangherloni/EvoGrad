@@ -53,19 +53,24 @@ Example:
 """
 
 # Genetic Algorithm
-from evograd.algorithms.ga import GA, ga_default, ga_steady_state, ga_comma
+from evograd.algorithms.ga import (
+    GA,
+    ga_default,
+    ga_steady_state,
+    ga_comma)
 
 # Differential Evolution
-from evograd.algorithms.de import (
+from .de import (
     DE,
     DEVariant,
+    de_default,
     de_rand_1_bin,
     de_best_1_bin,
     de_current_to_best_1_bin,
 )
 
 # SHADE and L-SHADE
-from evograd.algorithms.shade import (
+from .shade import (
     SHADE,
     LSHADE,
     SHADEMemory,
@@ -76,18 +81,14 @@ from evograd.algorithms.shade import (
 )
 
 # Particle Swarm Optimisation
-from evograd.algorithms.pso import (
+from .pso import (
     PSO,
     pso_default,
-    pso_constriction,
-    pso_adaptive,
-)
+    pso_constriction)
 
 # CMA-ES
-from evograd.algorithms.cmaes import (
+from .cmaes import (
     CMAES,
-    RestartRegime,
-    RestartState,
     cmaes_default,
     cmaes_small,
     cmaes_large,
@@ -96,21 +97,23 @@ from evograd.algorithms.cmaes import (
     cmaes_bipop,
 )
 
+
 __all__ = [
-    # Genetic Algorithm
+    # GAs
     "GA",
     "ga_default",
     "ga_steady_state",
     "ga_comma",
     
-    # Differential Evolution
+    # DE
     "DE",
     "DEVariant",
+    "de_default",
     "de_rand_1_bin",
     "de_best_1_bin",
     "de_current_to_best_1_bin",
     
-    # SHADE and L-SHADE
+    # SHADE family
     "SHADE",
     "LSHADE",
     "SHADEMemory",
@@ -119,16 +122,13 @@ __all__ = [
     "lshade_default",
     "lshade_adaptive",
     
-    # Particle Swarm Optimisation
+    # PSO
     "PSO",
     "pso_default",
     "pso_constriction",
-    "pso_adaptive",
     
     # CMA-ES
     "CMAES",
-    "RestartRegime",
-    "RestartState",
     "cmaes_default",
     "cmaes_small",
     "cmaes_large",

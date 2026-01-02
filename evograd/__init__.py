@@ -31,7 +31,8 @@ Quick Start
 ...     selection=TournamentSelection(tournament_size=3),
 ...     crossover=SBX(eta=15, prob=0.9),
 ...     mutation=PolynomialMutation(eta=20),
-...     differentiable=True,  # Enable gradient-based hyperparameter learning
+...     adaptive=True,        # Enable gradient-based hyperparameter learning
+...     differentiable=True,  # Enable gradient-based population learning
 ... )
 >>>
 >>> # Run optimization

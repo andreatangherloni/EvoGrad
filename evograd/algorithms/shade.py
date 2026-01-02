@@ -364,6 +364,7 @@ class SHADE(Algorithm):
             eliminate_duplicates=False,
             n_offsprings=pop_size,
             differentiable=differentiable,  # Controls whether population is learnable
+            adaptive=adaptive,
             seed=seed,
             device=device,
             dtype=dtype,
@@ -397,7 +398,7 @@ class SHADE(Algorithm):
         from evograd.operators.selection import TruncationSelection
         return TruncationSelection(
             truncation_ratio=p_best_rate,
-            differentiable=adaptive,
+            adaptive=adaptive,
             temperature=temperature,
             learn_temperature=adaptive,  # Only learn if adaptive
             minimize=True,
@@ -421,7 +422,7 @@ class SHADE(Algorithm):
         
         from evograd.operators.selection import RandomSelection
         return RandomSelection(replacement=True,
-                               differentiable=adaptive,
+                               adaptive=adaptive,
                                temperature=temperature,
                                )
     
@@ -441,7 +442,7 @@ class SHADE(Algorithm):
         from evograd.operators.crossover import BinomialCrossover
         return BinomialCrossover(
             cr=0.5,  # Default CR, will be overridden per-individual
-            differentiable=adaptive,  # Differentiable if adaptive
+            adaptive=adaptive,  # Differentiable if adaptive
             learn_cr=False,  # CR comes from memory sampling, not learned directly
         )
     
@@ -826,8 +827,8 @@ class LSHADE(SHADE):
             init_CR=init_CR,
             sampling=sampling,
             repair=repair,
-            adaptive=adaptive,
             differentiable=differentiable,
+            adaptive=adaptive,
             selection_temperature=selection_temperature,
             seed=seed,
             device=device,

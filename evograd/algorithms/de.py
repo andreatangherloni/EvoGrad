@@ -67,8 +67,7 @@ from evograd.core.algorithm import Algorithm
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
 
-__all__ = ["DE", "DEVariant"]
-
+__all__ = ["DE", "DEVariant", "de_default", "de_rand_1_bin", "de_best_1_bin", "de_current_to_best_1_bin"]
 
 # =============================================================================
 # DE Variant Parser
@@ -261,6 +260,7 @@ class DE(Algorithm):
             eliminate_duplicates=False,  # DE doesn't eliminate duplicates
             n_offsprings=pop_size,  # DE creates one trial per individual
             differentiable=differentiable,
+            adaptive=adaptive,
             seed=seed,
             device=device,
             dtype=dtype,
@@ -280,14 +280,14 @@ class DE(Algorithm):
             from evograd.operators.crossover import BinomialCrossover
             return BinomialCrossover(
                 cr=CR,
-                differentiable=adaptive,  # Differentiable when adaptive
+                adaptive=adaptive,  # Differentiable when adaptive
                 learn_cr=adaptive,  # Learn CR when adaptive
             )
         elif self.variant.crossover == "exp":
             from evograd.operators.crossover import ExponentialCrossover
             return ExponentialCrossover(
                 cr=CR,
-                differentiable=adaptive,  # Differentiable when adaptive
+                adaptive=adaptive,  # Differentiable when adaptive
                 learn_cr=adaptive,  # Learn CR when adaptive
             )
         return None
@@ -299,7 +299,7 @@ class DE(Algorithm):
         """
         from evograd.operators.selection import RandomSelection
         return RandomSelection(replacement=True,
-                               differentiable=adaptive,
+                               adaptive=adaptive,
                                temperature=temperature,
                                )
         
@@ -671,6 +671,45 @@ class DE(Algorithm):
 # =============================================================================
 # Convenience Factory Functions
 # =============================================================================
+
+
+def de_default(
+    pop_size: int = 100,
+    F: float = 0.5,
+    CR: float = 0.9,
+    per_individual_coeffs: bool = False,
+    adaptive: bool = False,
+    differentiable: bool = False,
+    **kwargs,
+) -> "DE":
+    """
+    Create a default Differential Evolution instance (DE/rand/1/bin).
+
+    This is the canonical DE configuration and the recommended starting point.
+
+    Args:
+        pop_size: Population size.
+        F: Mutation scale factor.
+        CR: Crossover rate.
+        per_individual_coeffs: If True, sample F and CR per individual.
+        adaptive: If True, operators are differentiable with learnable hyperparams.
+        differentiable: If True, population is learnable.
+        **kwargs: Additional arguments passed to DE.
+
+    Returns:
+        Configured DE instance.
+    """
+    return DE(
+        pop_size=pop_size,
+        variant="DE/rand/1/bin",
+        F=F,
+        CR=CR,
+        per_individual_coeffs=per_individual_coeffs,
+        adaptive=adaptive,
+        differentiable=differentiable,
+        **kwargs,
+    )
+
 
 def de_rand_1_bin(
     pop_size: int = 100,

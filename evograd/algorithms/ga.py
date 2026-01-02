@@ -14,10 +14,12 @@ All operators are pluggable via dependency injection (pymoo-style),
 allowing flexible customisation of the algorithm behavior.
 
 Differentiable Mode:
-    When `differentiable=True`, the entire generation is a differentiable
-    computation graph. Selection uses Gumbel-Softmax, crossover and
-    mutation use Binary-Concrete masks, enabling gradient-based
-    hyperparameter learning.
+    Differentiable Mode:
+    When `differentiable=True`, the population is stored as nn.Parameter,
+    enabling gradient flow through the entire evolutionary cycle.
+    
+    When operators have `adaptive=True`, their internal parameters
+    (temperature, eta, prob, etc.) are also learnable nn.Parameters.
 
 Example:
     >>> from evograd.algorithms import GA
@@ -102,8 +104,9 @@ class GA(Algorithm):
         repair: Repair operator for constraint handling.
         n_offsprings: Number of offspring per generation.
             Default: pop_size (generational GA).
-        eliminate_duplicates: Duplicate handling strategy.
-        differentiable: Enable gradient flow through operations.
+        eliminate_duplicates: Duplicate handling strategy.        
+        differentiable: Enable gradient flow through population.
+        adaptive: Enable learnable operator parameters.
         seed: Random seed for reproducibility.
         device: Computation device ('cpu', 'cuda', 'mps', or None).
         dtype: Tensor dtype (default: torch.float32).
@@ -150,6 +153,7 @@ class GA(Algorithm):
         n_offsprings: Optional[int] = None,
         eliminate_duplicates: bool = True,
         differentiable: bool = True,
+        adaptive: bool = True,
         seed: Optional[int] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
@@ -159,7 +163,7 @@ class GA(Algorithm):
             from evograd.operators.selection import TournamentSelection
             selection = TournamentSelection(
                 tournament_size=3,
-                differentiable=differentiable,
+                adaptive=adaptive,
             )
         
         if crossover is None:
@@ -167,7 +171,7 @@ class GA(Algorithm):
             crossover = SBXCrossover(
                 eta=15,
                 prob=0.9,
-                differentiable=differentiable,
+                adaptive=adaptive,
             )
         
         if mutation is None:
@@ -175,7 +179,7 @@ class GA(Algorithm):
             mutation = PolynomialMutation(
                 eta=20,
                 prob=None,  # Default: 1/n_var
-                differentiable=differentiable,
+                adaptive=adaptive,
             )
         
         if survival is None:
@@ -184,8 +188,17 @@ class GA(Algorithm):
                 n_survive=pop_size,
                 elitism=True,
                 n_elite=1,
-                differentiable=differentiable,
+                adaptive=adaptive,
             )
+        
+        is_adaptive = selection.adaptive or crossover.adaptive or mutation.adaptive
+        
+        if not is_adaptive and survival.adaptive:
+            adaptive = False
+            survival.adaptive = False
+            for p in survival.parameters():
+                p.requires_grad = False
+            
         
         # Call super().__init__() first before any attribute assignments
         super().__init__(
@@ -199,6 +212,7 @@ class GA(Algorithm):
             eliminate_duplicates=eliminate_duplicates,
             n_offsprings=n_offsprings,
             differentiable=differentiable,
+            adaptive=adaptive,
             seed=seed,
             device=device,
             dtype=dtype,
@@ -389,6 +403,7 @@ class GA(Algorithm):
 def ga_default(
     pop_size: int = 100,
     differentiable: bool = True,
+    adaptive: bool = True,
     **kwargs,
 ) -> GA:
     """
@@ -403,6 +418,7 @@ def ga_default(
     Args:
         pop_size: Population size.
         differentiable: Enable gradient flow.
+        adaptive: Enable learnable operator parameters.
         **kwargs: Additional arguments passed to GA.
     
     Returns:
@@ -420,9 +436,10 @@ def ga_default(
             n_survive=pop_size,
             elitism=True,
             n_elite=1,
-            differentiable=differentiable,
+            adaptive=adaptive,
         ),
         differentiable=differentiable,
+        adaptive=adaptive,
         **kwargs,
     )
 
@@ -431,6 +448,7 @@ def ga_steady_state(
     pop_size: int = 100,
     n_offsprings: int = 2,
     differentiable: bool = True,
+    adaptive: bool = True,
     **kwargs,
 ) -> GA:
     """
@@ -443,6 +461,7 @@ def ga_steady_state(
         pop_size: Population size.
         n_offsprings: Number of offspring per generation.
         differentiable: Enable gradient flow.
+        adaptive: Enable learnable operator parameters.
         **kwargs: Additional arguments passed to GA.
     
     Returns:
@@ -461,9 +480,10 @@ def ga_steady_state(
             n_survive=pop_size,
             elitism=True,
             n_elite=1,
-            differentiable=differentiable,
+            adaptive=adaptive,
         ),
         differentiable=differentiable,
+        adaptive=adaptive,
         **kwargs,
     )
 
@@ -472,6 +492,7 @@ def ga_comma(
     pop_size: int = 50,
     n_offsprings: int = 100,
     differentiable: bool = True,
+    adaptive: bool = True,
     **kwargs,
 ) -> GA:
     """
@@ -485,6 +506,7 @@ def ga_comma(
         pop_size: Population size (μ).
         n_offsprings: Number of offspring (λ).
         differentiable: Enable gradient flow.
+        adaptive: Enable learnable operator parameters.
         **kwargs: Additional arguments passed to GA.
     
     Returns:
@@ -509,8 +531,9 @@ def ga_comma(
             n_survive=pop_size,
             elitism=True,  # Still keep elitism to preserve best
             n_elite=1,
-            differentiable=differentiable,
+            adaptive=adaptive,
         ),
         differentiable=differentiable,
+        adaptive=adaptive,
         **kwargs,
     )

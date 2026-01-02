@@ -267,6 +267,7 @@ class CMAES(Algorithm):
             eliminate_duplicates=False,
             n_offsprings=effective_pop_size,
             differentiable=differentiable,
+            adaptive=adaptive,
             seed=seed,
             device=device,
             dtype=dtype,
