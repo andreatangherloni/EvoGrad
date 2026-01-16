@@ -191,8 +191,8 @@ def main():
     ap.add_argument("--max-evals", type=int, default=50000,
                     help="Maximum fitness evaluations per run")
     ap.add_argument("--configs", type=str, nargs="+",
-                    default=["classic", "differentiable", "full"],
-                    choices=["classic", "adaptive", "differentiable", "full"],
+                    default=["classic", "diff", "full"],
+                    choices=["classic", "adaptive", "diff", "full"],
                     help="GA configurations to test")
     
     # Problem settings
@@ -274,13 +274,12 @@ def main():
             lambda_sparsity=args.lambda_sparsity,
             seed=seed,
             device=device,
-            differentiable=False,  # Will be set per-algorithm
         )
 
         # Run GA configurations
         if not args.skip_ga:
             for cfg in args.configs:
-                print(f"[run {run+1:02d}/{args.runs}] GA {cfg} (seed={seed})")
+                print(f"[run {run+1:02d}/{args.runs:02d}] GA {cfg} (seed={seed})")
                 
                 result = run_single_experiment(
                     problem=problem,
@@ -296,14 +295,14 @@ def main():
                 result["function"] = args.function_name
                 results.append(result)
 
-        # Random baseline
+        # Random baseline (consistent naming: "RandomSearch")
         if args.with_random:
-            print(f"[run {run+1:02d}/{args.runs}] RandomSearch (seed={seed})")
+            print(f"[run {run+1:02d}/{args.runs:02d}] RandomSearch (seed={seed})")
             
             result = run_single_experiment(
                 problem=problem,
                 algorithm="RandomSearch",
-                config="random search",
+                config="RandomSearch",  # Consistent with dynamic script
                 pop=args.pop,
                 max_evals=args.max_evals,
                 seed=seed,
@@ -314,14 +313,14 @@ def main():
             result["function"] = args.function_name
             results.append(result)
 
-        # Adam baseline
+        # Adam baseline (consistent naming: "Adam")
         if args.with_adam:
-            print(f"[run {run+1:02d}/{args.runs}] Adam (seed={seed})")
+            print(f"[run {run+1:02d}/{args.runs:02d}] Adam (seed={seed})")
             
             result = run_single_experiment(
                 problem=problem,
                 algorithm="Adam",
-                config="adam",
+                config="Adam",  # Consistent with dynamic script
                 pop=args.pop,
                 max_evals=args.max_evals,
                 seed=seed,

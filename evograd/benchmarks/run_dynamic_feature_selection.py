@@ -2,31 +2,39 @@
 """
 Run dynamic feature-selection benchmark with regime shifts.
 
+Key improvements:
+- Problem instance shared across configs within same run
+- Overlap parameter properly implemented
+- Regime-aware feature recovery metrics
+- Tracks adaptation speed after regime shifts
+
 Outputs one JSON per algorithm:
   - <out>_GA.json
   - <out>_Adam.json
   - <out>_RandomSearch.json
 
 Example:
-    python run_dynamic_feature_selection.py --out results/dynfeaturesel.json \
+    python evograd/benchmarks/run_dynamic_feature_selection.py --out results/dynfeaturesel.json \
         --with-random --with-adam --n-regimes 6 --shift-every 5000 --overlap 0.25
 """
 
 import argparse
 import sys
-import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from collections import defaultdict
+
+import torch
+import numpy as np
 
 # Path setup for running from project root
 SCRIPT_DIR = Path(__file__).resolve().parent
 EVOGRAD_PARENT = SCRIPT_DIR.parent.parent
 
 if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))  # For 'feature_selection' subpackage
+    sys.path.insert(0, str(SCRIPT_DIR))
 if str(EVOGRAD_PARENT) not in sys.path:
-    sys.path.insert(0, str(EVOGRAD_PARENT))  # For 'evograd' package
+    sys.path.insert(0, str(EVOGRAD_PARENT))
 
 # Import local modules
 from feature_selection.common import (
@@ -37,11 +45,11 @@ from feature_selection.common import (
     compute_feature_recovery_metrics,
     compute_mask_statistics,
 )
-
 from feature_selection.dynamic_feature_selection import DynamicFeatureSelectELMProblem
 from feature_selection.ga_runner import run_ga
 from feature_selection.random_runner import run_random
 from feature_selection.adam_runner import run_adam
+
 
 def _split_and_write(
     out_path: Path,
@@ -199,10 +207,10 @@ def main():
     ap.add_argument("--pop", type=int, default=100,
                     help="Population size")
     ap.add_argument("--max-evals", type=int, default=50000,
-                    help="Maximum fitness evaluations per run")    
+                    help="Maximum fitness evaluations per run")
     ap.add_argument("--configs", type=str, nargs="+",
-                    default=["classic", "differentiable", "full"],
-                    choices=["classic", "adaptive", "differentiable", "full"],
+                    default=["classic", "diff", "full"],
+                    choices=["classic", "adaptive", "diff", "full"],
                     help="GA configurations to test")
     
     # Problem settings
@@ -229,6 +237,12 @@ def main():
     ap.add_argument("--cycle-regimes", action="store_true",
                     help="Cycle through regimes instead of stopping at last")
     
+    # Difficulty presets (override individual settings)
+    ap.add_argument("--difficulty", type=str, default=None,
+                    choices=["easy", "medium", "hard", "nightmare"],
+                    help="Difficulty preset (overrides individual dynamic settings)")
+    
+    
     # Hardware
     ap.add_argument("--device", type=str, default="cpu",
                     choices=["cpu", "cuda", "mps"],
@@ -253,6 +267,59 @@ def main():
     ap.add_argument("--adam-weight-decay", type=float, default=0.0)
 
     args = ap.parse_args()
+
+    # Apply difficulty presets (override individual settings)
+    if args.difficulty:
+        presets = {
+            "easy": {
+                "n_features": 200,
+                "n_informative": 20,
+                "shift_every": 10000,
+                "overlap": 0.5,
+                "n_regimes": 4,
+                "cycle_regimes": False,
+                "lambda_sparsity": 0.01,
+                "noise": 0.1,
+            },
+            "medium": {
+                "n_features": 200,
+                "n_informative": 20,
+                "shift_every": 5000,
+                "overlap": 0.25,
+                "n_regimes": 6,
+                "cycle_regimes": False,
+                "lambda_sparsity": 0.01,
+                "noise": 0.1,
+            },
+            "hard": {
+                "n_features": 300,
+                "n_informative": 15,
+                "shift_every": 2000,
+                "overlap": 0.1,
+                "n_regimes": 8,
+                "cycle_regimes": True,
+                "lambda_sparsity": 0.03,
+                "noise": 0.2,
+            },
+            "nightmare": {
+                "n_features": 500,
+                "n_informative": 10,
+                "shift_every": 1000,
+                "overlap": 0.0,
+                "n_regimes": 10,
+                "cycle_regimes": True,
+                "lambda_sparsity": 0.05,
+                "noise": 0.3,
+            },
+        }
+        preset = presets[args.difficulty]
+        print(f"\n{'='*60}")
+        print(f"Applying '{args.difficulty}' difficulty preset:")
+        print(f"{'='*60}")
+        for key, value in preset.items():
+            setattr(args, key, value)
+            print(f"  {key}: {value}")
+        print(f"{'='*60}\n")
 
     device = resolve_device(args.device)
     device_str = args.device
@@ -298,7 +365,6 @@ def main():
             cycle_regimes=args.cycle_regimes,
             seed=seed,
             device=device,
-            differentiable=False,
         )
         
         # Log regime overlap for verification
@@ -312,7 +378,7 @@ def main():
         # Run GA configurations
         if not args.skip_ga:
             for cfg in args.configs:
-                print(f"[run {run+1:02d}/{args.runs}] GA {cfg} (seed={seed})")
+                print(f"[run {run+1:02d}/{args.runs:02d}] GA {cfg} (seed={seed})")
                 
                 result = run_single_experiment(
                     problem=problem,
@@ -329,12 +395,12 @@ def main():
 
         # Random baseline
         if args.with_random:
-            print(f"[run {run+1:02d}/{args.runs}] RandomSearch (seed={seed})")
+            print(f"[run {run+1:02d}/{args.runs:02d}] RandomSearch (seed={seed})")
             
             result = run_single_experiment(
                 problem=problem,
                 algorithm="RandomSearch",
-                config="random search",
+                config="RandomSearch",
                 pop=args.pop,
                 max_evals=args.max_evals,
                 seed=seed,
@@ -346,12 +412,12 @@ def main():
 
         # Adam baseline
         if args.with_adam:
-            print(f"[run {run+1:02d}/{args.runs}] Adam (seed={seed})")
+            print(f"[run {run+1:02d}/{args.runs:02d}] Adam (seed={seed})")
             
             result = run_single_experiment(
                 problem=problem,
                 algorithm="Adam",
-                config="adam",
+                config="Adam",
                 pop=args.pop,
                 max_evals=args.max_evals,
                 seed=seed,

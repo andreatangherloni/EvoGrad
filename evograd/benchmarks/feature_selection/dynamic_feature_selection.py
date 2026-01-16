@@ -47,13 +47,11 @@ class DynamicFeatureSelectELMProblem:
         cycle_regimes: If True, cycle through regimes; if False, stay at last.
         seed: Random seed for weight generation.
         device: Torch device for computation.
-        differentiable: If True, use sigmoid squashing for gradient flow.
     
     Example:
         >>> problem = DynamicFeatureSelectELMProblem(
         ...     X_train, X_val, n_informative=20, noise=0.1,
         ...     n_regimes=5, shift_every=5000, overlap=0.25,
-        ...     differentiable=True
         ... )
         >>> fitness = problem.evaluate(population)
         >>> print(f"Current regime: {problem.current_regime}")
@@ -73,8 +71,7 @@ class DynamicFeatureSelectELMProblem:
         overlap: float,
         cycle_regimes: bool,
         seed: int,
-        device: torch.device,
-        differentiable: bool = False,
+        device: torch.device
     ):
         self.device = device
         self.X_train = X_train.to(device)
@@ -92,7 +89,6 @@ class DynamicFeatureSelectELMProblem:
         self.n_informative = n_informative
         self.overlap = overlap
         self.noise = noise
-        self.differentiable = differentiable
         self._seed = seed
 
         # Pre-allocate ridge regularisation matrix
@@ -199,12 +195,8 @@ class DynamicFeatureSelectELMProblem:
             return int(min(r, len(self.weights) - 1))
 
     def _constrain_mask(self, population: Tensor) -> Tensor:
-        """Constrain population to [0, 1] with appropriate method."""
-        if self.differentiable:
-            centered = (population - 0.5) * 6.0
-            return torch.sigmoid(centered)
-        else:
-            return population.clamp(self.xl, self.xu)
+        """Constrain population to [0, 1]"""
+        return population.clamp(self.xl, self.xu)
 
     def evaluate(self, population: Tensor) -> Tensor:
         """

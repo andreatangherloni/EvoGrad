@@ -10,9 +10,7 @@ The objective is:
 
 where m ∈ [0,1]^D is a soft feature mask.
 
-Supports both classical and differentiable optimisation modes:
-- Classical: Hard clamp to [0,1] bounds
-- Differentiable: Sigmoid squashing to preserve gradient flow
+Supports hard clamp to [0,1] bounds
 """
 
 import numpy as np
@@ -43,12 +41,11 @@ class FeatureSelectELMProblem:
         lambda_sparsity: Sparsity penalty coefficient.
         seed: Random seed for ELM weight initialisation.
         device: Torch device for computation.
-        differentiable: If True, use sigmoid squashing instead of hard clamp.
     
     Example:
         >>> problem = FeatureSelectELMProblem(
         ...     X_train, y_train, X_val, y_val,
-        ...     hidden=128, lambda_sparsity=0.01, differentiable=True
+        ...     hidden=128, lambda_sparsity=0.01,
         ... )
         >>> fitness = problem.evaluate(population)  # shape: (pop_size,)
     """
@@ -64,7 +61,6 @@ class FeatureSelectELMProblem:
         lambda_sparsity: float = 1e-2,
         seed: int = 0,
         device: Optional[torch.device] = None,
-        differentiable: bool = False,
     ):
         self.device = device or X_train.device
         self.X_train = X_train.to(self.device)
@@ -79,7 +75,6 @@ class FeatureSelectELMProblem:
         self.hidden = hidden
         self.ridge_alpha = ridge_alpha
         self.lambda_sparsity = lambda_sparsity
-        self.differentiable = differentiable
 
         # Pre-allocate ridge regularisation matrix (avoid repeated creation)
         self._ridge_eye = ridge_alpha * torch.eye(hidden, device=self.device)
@@ -92,29 +87,10 @@ class FeatureSelectELMProblem:
         
         # Store seed for reproducibility tracking
         self._seed = seed
-
+    
     def _constrain_mask(self, population: Tensor) -> Tensor:
-        """
-        Constrain population to [0, 1] bounds.
-        
-        In differentiable mode, uses sigmoid squashing to preserve gradients.
-        In classical mode, uses hard clamping.
-        
-        Args:
-            population: Raw population tensor, shape (pop_size, n_var).
-            
-        Returns:
-            Constrained mask tensor in [0, 1]^D.
-        """
-        if self.differentiable:
-            # Sigmoid squashing: smooth, differentiable, gradients never zero
-            # Scale factor of 6 makes sigmoid(0)=0.5, sigmoid(±3)≈0/1
-            # This maps roughly [-0.5, 1.5] -> [0.05, 0.95]
-            centered = (population - 0.5) * 6.0
-            return torch.sigmoid(centered)
-        else:
-            # Hard clamp: efficient but zero gradients at boundaries
-            return population.clamp(self.xl, self.xu)
+        """Constrain population to [0, 1]"""
+        return population.clamp(self.xl, self.xu)
 
     def evaluate(self, population: Tensor) -> Tensor:
         """
@@ -168,16 +144,7 @@ class FeatureSelectELMProblem:
         return mse + sparsity
 
     def get_effective_mask(self, population: Tensor, threshold: float = 0.5) -> Tensor:
-        """
-        Get binary feature selection from soft masks.
-        
-        Args:
-            population: Soft masks, shape (pop_size, n_var).
-            threshold: Threshold for considering a feature selected.
-            
-        Returns:
-            Binary masks, shape (pop_size, n_var).
-        """
+        """Get binary feature selection from soft masks."""
         m = self._constrain_mask(population)
         return (m > threshold).float()
 

@@ -6,10 +6,10 @@ for different modes: classic, adaptive, differentiable, full.
 """
 
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 from .common import import_minimize, import_ga_default, make_termination
-
+from evograd.operators.repair import ClipRepair, ReflectRepair
 
 def run_ga(
     problem,
@@ -18,7 +18,7 @@ def run_ga(
     max_evals: int,
     seed: int,
     device: str,
-) -> Tuple[float, List[float], int]:
+) -> Tuple[float, List[float], int, Optional[object]]:
     """
     Run Genetic Algorithm on a feature selection problem.
     
@@ -27,7 +27,7 @@ def run_ga(
         config: Configuration string:
             - 'classic': No gradients, no adaptive hyperparameters
             - 'adaptive': Learnable hyperparameters, no population gradients
-            - 'differentiable': Population gradients, fixed hyperparameters
+            - 'diff'/'differentiable': Population gradients, fixed hyperparameters
             - 'full': Both adaptive hyperparameters and population gradients
         pop: Population size.
         max_evals: Maximum fitness evaluations.
@@ -35,27 +35,25 @@ def run_ga(
         device: Device string ('cpu', 'cuda', 'mps').
         
     Returns:
-        Tuple of (best_fitness, fitness_history, n_evaluations).
+        Tuple of (best_fitness, fitness_history, n_evaluations, best_solution).
     """
     minimize = import_minimize()
     ga_default = import_ga_default()
 
-    # Map config string to flags
+    # Map config string to flags (accept both "diff" and "differentiable")
     adaptive = config in ("adaptive", "full")
-    differentiable = config in ("differentiable", "full")
+    differentiable = config in ("diff", "differentiable", "full")
     
-    # Update problem's differentiable flag to match
-    if hasattr(problem, 'differentiable'):
-        problem.differentiable = differentiable
-
+    repair = ReflectRepair()
+    
     algo = ga_default(
         pop_size=pop,
         adaptive=adaptive,
         differentiable=differentiable,
         device=device,
+        repair=repair,
     )
     term = make_termination(max_evals)
-
     res = minimize(problem, algo, termination=term, seed=seed, verbose=False)
     
     # Extract results with fallbacks

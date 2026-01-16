@@ -1,11 +1,11 @@
 """
 Adam baseline runner for feature selection benchmarks.
 
-Uses gradient descent with sigmoid-transformed parameters to optimise
-the feature mask directly.
+Uses projected gradient descent to optimise the feature mask directly
+in [0, 1] space. After each Adam update, values are clamped to maintain
+feasibility.
 """
 
-import numpy as np
 import torch
 from torch import Tensor
 from typing import Tuple, List, Optional
@@ -25,9 +25,10 @@ def run_adam(
     """
     Run Adam optimiser on feature selection problem.
     
-    Optimises in unconstrained space (z) and applies sigmoid to get
-    mask values in [0, 1]. Uses multiple parallel "individuals" for
-    fair comparison with population-based methods.
+    Optimises directly in [0, 1] mask space using projected gradient
+    descent. After each Adam update, values are clamped to maintain
+    feasibility. Uses multiple parallel "individuals" for fair 
+    comparison with population-based methods.
     
     Args:
         problem: Feature selection problem instance.
@@ -44,10 +45,11 @@ def run_adam(
         Tuple of (best_fitness, fitness_history, n_evaluations, best_solution).
     """
     torch.manual_seed(seed)
+        
+    # Directly optimise mask in [0, 1] - initialise at center
+    m = torch.full((pop, problem.n_var), 0.5, device=device, requires_grad=True)
     
-    # Initialise in unconstrained space (sigmoid(0) = 0.5)
-    z = torch.zeros(pop, problem.n_var, device=device, requires_grad=True)
-    opt = torch.optim.Adam([z], lr=lr, betas=(b1, b2), weight_decay=wd)
+    opt = torch.optim.Adam([m], lr=lr, betas=(b1, b2), weight_decay=wd)
 
     best = float("inf")
     best_solution = None
@@ -57,32 +59,25 @@ def run_adam(
     while evals < max_evals:
         opt.zero_grad()
         
-        # Transform to [0, 1] range
-        m = torch.sigmoid(z)
-        
-        # Evaluate (problem should handle differentiable mode internally)
-        # Temporarily set differentiable mode for Adam
-        old_diff = getattr(problem, 'differentiable', False)
-        problem.differentiable = True
-        
+        # Evaluate fitness (problem handles internal clamping)
         f = problem.evaluate(m)
-        
-        # Restore original mode
-        problem.differentiable = old_diff
-        
-        # Backpropagate mean loss
+
+        # Backpropagate mean loss across population
         loss = f.mean()
         loss.backward()
         opt.step()
-
-        # Track best (without gradient tracking to avoid memory leak)
+        
+        # Project back to feasible region [0, 1]
         with torch.no_grad():
+            m.clamp_(0.0, 1.0)
+
+            # Track best solution
             min_idx = f.argmin()
             min_val = float(f[min_idx])
             if min_val < best:
                 best = min_val
                 best_solution = m[min_idx].detach().clone()
-        
+
         hist.append(best)
         evals += pop
 

@@ -10,12 +10,13 @@ Problems:
 
 Runners:
     - run_ga: Genetic Algorithm with classic/adaptive/diff/full modes
-    - run_adam: Adam gradient descent baseline
+    - run_adam: Adam gradient descent baseline (projected to [0,1])
     - run_random: Random search baseline
 
 Key Features:
     - Differentiable objective (closed-form ridge regression)
-    - Soft clamping for gradient flow preservation
+    - All methods optimise continuous masks in [0, 1]
+    - GA uses repair operators; Adam uses projection
     - Feature recovery metrics (Jaccard, F1, Precision, Recall)
     - Controlled overlap between regimes in dynamic setting
 
@@ -23,12 +24,15 @@ Example:
     >>> from feature_selection import FeatureSelectELMProblem
     >>> from feature_selection.common import make_synthetic_regression
     >>> 
-    >>> X_tr, y_tr, X_va, y_va, true_idx, weights = make_synthetic_regression(...)
+    >>> X_tr, y_tr, X_va, y_va, true_idx, weights = make_synthetic_regression(
+    ...     n_train=512, n_val=512, n_features=200, n_informative=20,
+    ...     noise=0.1, seed=42, device=torch.device('cpu')
+    ... )
     >>> problem = FeatureSelectELMProblem(
     ...     X_tr, y_tr, X_va, y_va,
-    ...     hidden=128, lambda_sparsity=0.01, differentiable=True
+    ...     hidden=128, lambda_sparsity=0.01,
     ... )
-    >>> fitness = problem.evaluate(population)
+    >>> fitness = problem.evaluate(population)  # population in [0, 1]^D
 """
 
 from .feature_selection import FeatureSelectELMProblem
@@ -62,4 +66,4 @@ __all__ = [
     "run_random",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
