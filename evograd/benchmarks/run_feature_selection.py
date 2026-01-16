@@ -2,8 +2,10 @@
 """
 Run static feature-selection benchmark (FeatureSelectELM).
 
-Outputs the same JSON structure as the rest of the EvoGrad benchmark tooling
-expects (plot_benchmarks.py, ranking scripts, etc.).
+It outputs one JSON per algorithm:
+  - <out>_GA.json
+  - <out>_Adam.json
+  - <out>_RandomSearch.json
 
 Example:
   python benchmarks/run_feature_selection.py --out results/ga_featureselect.json --with-random --with-adam
@@ -12,18 +14,15 @@ Example:
 import argparse
 import sys
 from pathlib import Path
+from collections import defaultdict
 
-# Directory containing this script (benchmarks/)
 SCRIPT_DIR = Path(__file__).resolve().parent
+EVOGRAD_PARENT = SCRIPT_DIR.parent.parent
 
-# Parent of benchmarks/ is evograd/, parent of evograd/ contains evograd package
-EVOGRAD_PARENT = SCRIPT_DIR.parent.parent  # Go up two levels to find evograd package
-
-# Add paths for imports
 if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))  # For 'functions' subpackage
+    sys.path.insert(0, str(SCRIPT_DIR))
 if str(EVOGRAD_PARENT) not in sys.path:
-    sys.path.insert(0, str(EVOGRAD_PARENT))  # For 'evograd' package
+    sys.path.insert(0, str(EVOGRAD_PARENT))
 
 from feature_selection.common import (
     resolve_device,
@@ -35,6 +34,24 @@ from feature_selection.feature_selection import FeatureSelectELMProblem
 from feature_selection.ga_runner import run_ga
 from feature_selection.random_runner import run_random
 from feature_selection.adam_runner import run_adam
+
+
+def _split_and_write(out_path: Path, n_var: int, max_evals: int, n_runs: int, results: list):
+    buckets = defaultdict(list)
+    for r in results:
+        algo = r.get("algorithm", "Unknown")
+        buckets[algo].append(r)
+
+    for algo, algo_results in buckets.items():
+        out_algo = out_path.with_name(out_path.stem + f"_{algo}.json")
+        write_results_json(
+            out_path=out_algo,
+            algorithm=algo,
+            n_var=n_var,
+            max_evals=max_evals,
+            n_runs=n_runs,
+            results=algo_results,
+        )
 
 
 def main():
@@ -60,12 +77,10 @@ def main():
     ap.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "mps"])
     ap.add_argument("--function-name", type=str, default="FeatureSelectELM")
 
-    # ---- Baselines toggles ----
-    ap.add_argument("--with-random", action="store_true", help="Also run RandomSearch baseline.")
-    ap.add_argument("--with-adam", action="store_true", help="Also run Adam baseline.")
-    ap.add_argument("--skip-ga", action="store_true", help="Skip GA runs (only baselines).")
+    ap.add_argument("--with-random", action="store_true")
+    ap.add_argument("--with-adam", action="store_true")
+    ap.add_argument("--skip-ga", action="store_true")
 
-    # ---- Adam hyperparams ----
     ap.add_argument("--adam-lr", type=float, default=0.05)
     ap.add_argument("--adam-beta1", type=float, default=0.9)
     ap.add_argument("--adam-beta2", type=float, default=0.999)
@@ -74,7 +89,7 @@ def main():
     args = ap.parse_args()
 
     device = resolve_device(args.device)
-    device_str = args.device  # keep original string for GA factory usage
+    device_str = args.device
     print(f"Device: {device}")
 
     results = []
@@ -83,7 +98,6 @@ def main():
         seed = 1234 + run
         set_all_seeds(seed)
 
-        # Data
         Xtr, ytr, Xva, yva, _ = make_synthetic_regression(
             n_train=512,
             n_val=512,
@@ -94,7 +108,6 @@ def main():
             device=device,
         )
 
-        # Problem (static)
         problem = FeatureSelectELMProblem(
             X_train=Xtr,
             y_train=ytr,
@@ -107,9 +120,6 @@ def main():
             device=device,
         )
 
-        # ------------------------
-        # GA configs
-        # ------------------------
         if not args.skip_ga:
             for cfg in args.configs:
                 print(f"[run {run+1:02d}/{args.runs}] GA {cfg} (seed={seed})")
@@ -131,9 +141,6 @@ def main():
                     "n_evals": n_evals,
                 })
 
-        # ------------------------
-        # Random baseline
-        # ------------------------
         if args.with_random:
             print(f"[run {run+1:02d}/{args.runs}] RandomSearch baseline (seed={seed})")
             best_f, hist, n_evals = run_random(
@@ -153,9 +160,6 @@ def main():
                 "n_evals": n_evals,
             })
 
-        # ------------------------
-        # Adam baseline
-        # ------------------------
         if args.with_adam:
             print(f"[run {run+1:02d}/{args.runs}] Adam baseline (seed={seed})")
             best_f, hist, n_evals = run_adam(
@@ -180,9 +184,8 @@ def main():
             })
 
     out_path = Path(args.out)
-    write_results_json(
+    _split_and_write(
         out_path=out_path,
-        algorithm="GA",
         n_var=args.n_features,
         max_evals=args.max_evals,
         n_runs=args.runs,

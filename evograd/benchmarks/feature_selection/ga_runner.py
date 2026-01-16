@@ -7,7 +7,7 @@ def run_ga(problem, config, pop, max_evals, seed, device):
     ga_default = import_ga_default()
 
     adaptive = config in ("adaptive", "full")
-    differentiable = config in ("diff", "full")
+    differentiable = config in ("differentiable", "full")
 
     algo = ga_default(pop_size=pop, adaptive=adaptive, differentiable=differentiable, device=device)
     term = make_termination(max_evals)

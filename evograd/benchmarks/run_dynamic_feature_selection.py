@@ -2,16 +2,18 @@
 """
 Run dynamic feature-selection benchmark (DynFeatureSelectELM) with regime shifts.
 
-Outputs the same JSON structure as the rest of the EvoGrad benchmark tooling
-expects (plot_benchmarks.py, ranking scripts, etc.).
+It outputs one JSON per algorithm:
+  - <out>_GA.json
+  - <out>_Adam.json
+  - <out>_RandomSearch.json
 
-Example:
-  python benchmarks/run_dynamic_feature_selection.py --out results/ga_dynfeaturesel.json --with-random --with-adam
+python benchmarks/run_dynamic_feature_selection.py --out results/ga_dynfeaturesel.json --with-random --with-adam
 """
 
 import argparse
 import sys
 from pathlib import Path
+from collections import defaultdict
 
 # Directory containing this script (benchmarks/)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -21,7 +23,7 @@ EVOGRAD_PARENT = SCRIPT_DIR.parent.parent  # Go up two levels to find evograd pa
 
 # Add paths for imports
 if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))  # For 'functions' subpackage
+    sys.path.insert(0, str(SCRIPT_DIR))  # For 'feature_selection' subpackage
 if str(EVOGRAD_PARENT) not in sys.path:
     sys.path.insert(0, str(EVOGRAD_PARENT))  # For 'evograd' package
 
@@ -37,9 +39,31 @@ from feature_selection.random_runner import run_random
 from feature_selection.adam_runner import run_adam
 
 
+def _split_and_write(out_path: Path, n_var: int, max_evals: int, n_runs: int, results: list):
+    """
+    Split combined 'results' list by result["algorithm"] and write one JSON per algorithm.
+    """
+    buckets = defaultdict(list)
+    for r in results:
+        algo = r.get("algorithm", "Unknown")
+        buckets[algo].append(r)
+
+    for algo, algo_results in buckets.items():
+        out_algo = out_path.with_name(out_path.stem + f"_{algo}.json")
+        write_results_json(
+            out_path=out_algo,
+            algorithm=algo,
+            n_var=n_var,
+            max_evals=max_evals,
+            n_runs=n_runs,
+            results=algo_results,
+        )
+
+
 def main():
     ap = argparse.ArgumentParser()
 
+    # ---- Match ga_feature_select_benchmark.py (names standardized) ----
     ap.add_argument("--out", type=str, default="ga_featureselect.json")
     ap.add_argument("--runs", type=int, default=30)
     ap.add_argument("--pop", type=int, default=100)
@@ -61,10 +85,10 @@ def main():
     ap.add_argument("--function-name", type=str, default="DynFeatureSelectELM")
 
     # ---- Dynamic extras ----
-    ap.add_argument("--n-regimes", type=int, default=6, help="Number of regimes (ground-truth weight vectors).")
-    ap.add_argument("--shift-every", type=int, default=5000, help="Regime shift period in *evaluations*.")
-    ap.add_argument("--overlap", type=float, default=0.25, help="Fraction of informative features shared between consecutive regimes.")
-    ap.add_argument("--cycle-regimes", action="store_true", help="Cycle regimes instead of stopping at the last one.")
+    ap.add_argument("--n-regimes", type=int, default=6)
+    ap.add_argument("--shift-every", type=int, default=5000)
+    ap.add_argument("--overlap", type=float, default=0.25)
+    ap.add_argument("--cycle-regimes", action="store_true")
 
     # ---- Baselines toggles ----
     ap.add_argument("--with-random", action="store_true", help="Also run RandomSearch baseline.")
@@ -80,7 +104,7 @@ def main():
     args = ap.parse_args()
 
     device = resolve_device(args.device)
-    device_str = args.device  # keep original string for GA factory usage
+    device_str = args.device
     print(f"Device: {device}")
 
     results = []
@@ -89,7 +113,6 @@ def main():
         seed = 1234 + run
         set_all_seeds(seed)
 
-        # Data: in dynamic, we generate X only and let the problem generate y per regime
         Xtr, _, Xva, _, _ = make_synthetic_regression(
             n_train=512,
             n_val=512,
@@ -116,9 +139,7 @@ def main():
             device=device,
         )
 
-        # ------------------------
-        # GA configs
-        # ------------------------
+        # GA
         if not args.skip_ga:
             for cfg in args.configs:
                 print(f"[run {run+1:02d}/{args.runs}] GA {cfg} (seed={seed})")
@@ -140,9 +161,7 @@ def main():
                     "n_evals": n_evals,
                 })
 
-        # ------------------------
-        # Random baseline
-        # ------------------------
+        # RandomSearch
         if args.with_random:
             print(f"[run {run+1:02d}/{args.runs}] RandomSearch baseline (seed={seed})")
             best_f, hist, n_evals = run_random(
@@ -162,9 +181,7 @@ def main():
                 "n_evals": n_evals,
             })
 
-        # ------------------------
-        # Adam baseline
-        # ------------------------
+        # Adam
         if args.with_adam:
             print(f"[run {run+1:02d}/{args.runs}] Adam baseline (seed={seed})")
             best_f, hist, n_evals = run_adam(
@@ -189,9 +206,8 @@ def main():
             })
 
     out_path = Path(args.out)
-    write_results_json(
+    _split_and_write(
         out_path=out_path,
-        algorithm="GA",
         n_var=args.n_features,
         max_evals=args.max_evals,
         n_runs=args.runs,
