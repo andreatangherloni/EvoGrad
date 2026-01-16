@@ -1,47 +1,60 @@
 #!/usr/bin/env python3
 """
-Run dynamic feature-selection benchmark (DynFeatureSelectELM) with regime shifts.
+Run dynamic feature-selection benchmark with regime shifts.
 
-It outputs one JSON per algorithm:
+Outputs one JSON per algorithm:
   - <out>_GA.json
   - <out>_Adam.json
   - <out>_RandomSearch.json
 
-python benchmarks/run_dynamic_feature_selection.py --out results/ga_dynfeaturesel.json --with-random --with-adam
+Example:
+    python run_dynamic_feature_selection.py --out results/dynfeaturesel.json \
+        --with-random --with-adam --n-regimes 6 --shift-every 5000 --overlap 0.25
 """
 
 import argparse
 import sys
+import numpy as np
 from pathlib import Path
+from typing import Dict, Any, Optional, List
 from collections import defaultdict
 
-# Directory containing this script (benchmarks/)
+# Path setup for running from project root
 SCRIPT_DIR = Path(__file__).resolve().parent
+EVOGRAD_PARENT = SCRIPT_DIR.parent.parent
 
-# Parent of benchmarks/ is evograd/, parent of evograd/ contains evograd package
-EVOGRAD_PARENT = SCRIPT_DIR.parent.parent  # Go up two levels to find evograd package
-
-# Add paths for imports
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))  # For 'feature_selection' subpackage
 if str(EVOGRAD_PARENT) not in sys.path:
     sys.path.insert(0, str(EVOGRAD_PARENT))  # For 'evograd' package
 
+# Import local modules
 from feature_selection.common import (
     resolve_device,
     set_all_seeds,
     make_synthetic_regression,
     write_results_json,
+    compute_feature_recovery_metrics,
+    compute_mask_statistics,
 )
+
 from feature_selection.dynamic_feature_selection import DynamicFeatureSelectELMProblem
 from feature_selection.ga_runner import run_ga
 from feature_selection.random_runner import run_random
 from feature_selection.adam_runner import run_adam
 
-
-def _split_and_write(out_path: Path, n_var: int, max_evals: int, n_runs: int, results: list):
+def _split_and_write(
+    out_path: Path,
+    n_var: int,
+    max_evals: int,
+    n_runs: int,
+    results: List[Dict[str, Any]],
+    metadata: Optional[Dict[str, Any]] = None,
+):
     """
-    Split combined 'results' list by result["algorithm"] and write one JSON per algorithm.
+    Split results by algorithm and write separate JSON files.
+    
+    Creates files named <out_stem>_<Algorithm>.json for each algorithm.
     """
     buckets = defaultdict(list)
     for r in results:
@@ -57,45 +70,183 @@ def _split_and_write(out_path: Path, n_var: int, max_evals: int, n_runs: int, re
             max_evals=max_evals,
             n_runs=n_runs,
             results=algo_results,
+            metadata=metadata,
         )
 
 
+def run_single_experiment(
+    problem: DynamicFeatureSelectELMProblem,
+    algorithm: str,
+    config: str,
+    pop: int,
+    max_evals: int,
+    seed: int,
+    device,
+    device_str: str,
+    adam_params: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """
+    Run a single experiment on dynamic problem with regime tracking.
+    
+    Args:
+        problem: The dynamic feature selection problem instance.
+        algorithm: Algorithm name ('GA', 'RandomSearch', 'Adam').
+        config: Configuration string for GA modes.
+        pop: Population size.
+        max_evals: Maximum evaluations.
+        seed: Random seed.
+        device: Torch device object.
+        device_str: Device string for GA.
+        adam_params: Optional Adam hyperparameters.
+        
+    Returns:
+        Result dictionary with fitness history, regime info, and recovery metrics.
+    """
+    # Reset problem state for this run
+    problem.reset()
+    
+    # Run algorithm
+    if algorithm == "GA":
+        best_f, hist, n_evals, best_solution = run_ga(
+            problem=problem,
+            config=config,
+            pop=pop,
+            max_evals=max_evals,
+            seed=seed,
+            device=device_str,
+        )
+    elif algorithm == "RandomSearch":
+        best_f, hist, n_evals, best_solution = run_random(
+            problem=problem,
+            pop=pop,
+            max_evals=max_evals,
+            seed=seed,
+            device=device,
+        )
+    elif algorithm == "Adam":
+        best_f, hist, n_evals, best_solution = run_adam(
+            problem=problem,
+            pop=pop,
+            max_evals=max_evals,
+            seed=seed,
+            device=device,
+            lr=adam_params.get("lr", 0.05),
+            b1=adam_params.get("b1", 0.9),
+            b2=adam_params.get("b2", 0.999),
+            wd=adam_params.get("wd", 0.0),
+        )
+    else:
+        raise ValueError(f"Unknown algorithm: {algorithm}")
+    
+    # Get final regime (after all evaluations)
+    final_regime = problem.current_regime
+    
+    # Compute feature recovery metrics against FINAL regime's ground truth
+    recovery_metrics = {}
+    mask_stats = {}
+    
+    if best_solution is not None:
+        # Get effective mask
+        if hasattr(problem, 'get_effective_mask'):
+            soft_mask = problem._constrain_mask(best_solution.unsqueeze(0)).squeeze(0)
+        else:
+            soft_mask = best_solution
+        
+        # Recovery against final regime
+        final_true_indices = problem.get_current_informative_features()
+        recovery_metrics = compute_feature_recovery_metrics(
+            predicted_mask=soft_mask,
+            true_indices=final_true_indices,
+            n_features=problem.n_var,
+            threshold=0.5,
+        )
+        
+        mask_stats = compute_mask_statistics(soft_mask)
+    
+    # Compute regime overlap statistics
+    regime_overlaps = []
+    for i in range(len(problem.weights) - 1):
+        overlap = problem.get_regime_overlap(i, i + 1)
+        regime_overlaps.append(overlap)
+    
+    return {
+        "algorithm": algorithm,
+        "config": config,
+        "seed": seed,
+        "best_fitness_history": hist,
+        "best_fitness": best_f,
+        "n_evals": n_evals,
+        "final_regime": final_regime,
+        "regime_history": problem._regime_history,
+        "recovery_metrics": recovery_metrics,
+        "mask_statistics": mask_stats,
+        "regime_overlaps": regime_overlaps,
+    }
+
+
 def main():
-    ap = argparse.ArgumentParser()
-
-    # ---- Match ga_feature_select_benchmark.py (names standardized) ----
-    ap.add_argument("--out", type=str, default="ga_featureselect.json")
-    ap.add_argument("--runs", type=int, default=30)
-    ap.add_argument("--pop", type=int, default=100)
-    ap.add_argument("--max-evals", type=int, default=50000)
-    ap.add_argument(
-        "--configs",
-        type=str,
-        nargs="+",
-        default=["classic", "diff", "full"],
-        choices=["classic", "adaptive", "diff", "full"],
+    ap = argparse.ArgumentParser(
+        description="Run dynamic feature selection benchmark with regime shifts."
     )
-    ap.add_argument("--n-features", type=int, default=200)
-    ap.add_argument("--n-informative", type=int, default=20)
-    ap.add_argument("--noise", type=float, default=0.1)
-    ap.add_argument("--hidden", type=int, default=128)
-    ap.add_argument("--ridge-alpha", type=float, default=1e-2)
-    ap.add_argument("--lambda-sparsity", type=float, default=1e-2)
-    ap.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda", "mps"])
-    ap.add_argument("--function-name", type=str, default="DynFeatureSelectELM")
 
-    # ---- Dynamic extras ----
-    ap.add_argument("--n-regimes", type=int, default=6)
-    ap.add_argument("--shift-every", type=int, default=5000)
-    ap.add_argument("--overlap", type=float, default=0.25)
-    ap.add_argument("--cycle-regimes", action="store_true")
+    # Output
+    ap.add_argument("--out", type=str, default="ga_dynfeatureselect.json",
+                    help="Output JSON file path")
+    
+    # Experiment settings
+    ap.add_argument("--runs", type=int, default=30,
+                    help="Number of independent runs")
+    ap.add_argument("--pop", type=int, default=100,
+                    help="Population size")
+    ap.add_argument("--max-evals", type=int, default=50000,
+                    help="Maximum fitness evaluations per run")    
+    ap.add_argument("--configs", type=str, nargs="+",
+                    default=["classic", "differentiable", "full"],
+                    choices=["classic", "adaptive", "differentiable", "full"],
+                    help="GA configurations to test")
+    
+    # Problem settings
+    ap.add_argument("--n-features", type=int, default=200,
+                    help="Total number of features")
+    ap.add_argument("--n-informative", type=int, default=20,
+                    help="Number of informative features per regime")
+    ap.add_argument("--noise", type=float, default=0.1,
+                    help="Target noise level")
+    ap.add_argument("--hidden", type=int, default=128,
+                    help="ELM hidden layer size")
+    ap.add_argument("--ridge-alpha", type=float, default=1e-2,
+                    help="Ridge regression regularisation")
+    ap.add_argument("--lambda-sparsity", type=float, default=1e-2,
+                    help="Sparsity penalty coefficient")
+    
+    # Dynamic settings
+    ap.add_argument("--n-regimes", type=int, default=6,
+                    help="Number of regimes (distinct weight vectors)")
+    ap.add_argument("--shift-every", type=int, default=5000,
+                    help="Regime shift period in evaluations")
+    ap.add_argument("--overlap", type=float, default=0.25,
+                    help="Fraction of informative features shared between consecutive regimes")
+    ap.add_argument("--cycle-regimes", action="store_true",
+                    help="Cycle through regimes instead of stopping at last")
+    
+    # Hardware
+    ap.add_argument("--device", type=str, default="cpu",
+                    choices=["cpu", "cuda", "mps"],
+                    help="Compute device")
+    
+    # Naming
+    ap.add_argument("--function-name", type=str, default="DynFeatureSelectELM",
+                    help="Function name for results")
 
-    # ---- Baselines toggles ----
-    ap.add_argument("--with-random", action="store_true", help="Also run RandomSearch baseline.")
-    ap.add_argument("--with-adam", action="store_true", help="Also run Adam baseline.")
-    ap.add_argument("--skip-ga", action="store_true", help="Skip GA runs (only baselines).")
+    # Baseline toggles
+    ap.add_argument("--with-random", action="store_true",
+                    help="Include RandomSearch baseline")
+    ap.add_argument("--with-adam", action="store_true",
+                    help="Include Adam baseline")
+    ap.add_argument("--skip-ga", action="store_true",
+                    help="Skip GA runs (baselines only)")
 
-    # ---- Adam hyperparams ----
+    # Adam hyperparameters
     ap.add_argument("--adam-lr", type=float, default=0.05)
     ap.add_argument("--adam-beta1", type=float, default=0.9)
     ap.add_argument("--adam-beta2", type=float, default=0.999)
@@ -106,6 +257,14 @@ def main():
     device = resolve_device(args.device)
     device_str = args.device
     print(f"Device: {device}")
+    print(f"Overlap: {args.overlap:.0%} of features shared between regimes")
+
+    adam_params = {
+        "lr": args.adam_lr,
+        "b1": args.adam_beta1,
+        "b2": args.adam_beta2,
+        "wd": args.adam_weight_decay,
+    }
 
     results = []
 
@@ -113,7 +272,8 @@ def main():
         seed = 1234 + run
         set_all_seeds(seed)
 
-        Xtr, _, Xva, _, _ = make_synthetic_regression(
+        # Generate features only (targets generated per regime in problem)
+        Xtr, _, Xva, _, _, _ = make_synthetic_regression(
             n_train=512,
             n_val=512,
             n_features=args.n_features,
@@ -123,6 +283,7 @@ def main():
             device=device,
         )
 
+        # Create problem instance ONCE per run - shared across all configs!
         problem = DynamicFeatureSelectELMProblem(
             X_train=Xtr,
             X_val=Xva,
@@ -137,81 +298,93 @@ def main():
             cycle_regimes=args.cycle_regimes,
             seed=seed,
             device=device,
+            differentiable=False,
         )
+        
+        # Log regime overlap for verification
+        if run == 0:
+            print(f"Regime overlaps (Jaccard): ", end="")
+            for i in range(args.n_regimes - 1):
+                overlap_val = problem.get_regime_overlap(i, i + 1)
+                print(f"R{i}→R{i+1}: {overlap_val:.2f}  ", end="")
+            print()
 
-        # GA
+        # Run GA configurations
         if not args.skip_ga:
             for cfg in args.configs:
                 print(f"[run {run+1:02d}/{args.runs}] GA {cfg} (seed={seed})")
-                best_f, hist, n_evals = run_ga(
+                
+                result = run_single_experiment(
                     problem=problem,
+                    algorithm="GA",
                     config=cfg,
                     pop=args.pop,
                     max_evals=args.max_evals,
                     seed=seed,
-                    device=device_str,
+                    device=device,
+                    device_str=device_str,
                 )
-                results.append({
-                    "algorithm": "GA",
-                    "config": cfg,
-                    "function": args.function_name,
-                    "seed": seed,
-                    "best_fitness_history": hist,
-                    "best_fitness": best_f,
-                    "n_evals": n_evals,
-                })
+                result["function"] = args.function_name
+                results.append(result)
 
-        # RandomSearch
+        # Random baseline
         if args.with_random:
-            print(f"[run {run+1:02d}/{args.runs}] RandomSearch baseline (seed={seed})")
-            best_f, hist, n_evals = run_random(
+            print(f"[run {run+1:02d}/{args.runs}] RandomSearch (seed={seed})")
+            
+            result = run_single_experiment(
                 problem=problem,
+                algorithm="RandomSearch",
+                config="random search",
                 pop=args.pop,
                 max_evals=args.max_evals,
                 seed=seed,
                 device=device,
+                device_str=device_str,
             )
-            results.append({
-                "algorithm": "RandomSearch",
-                "config": "baseline",
-                "function": args.function_name,
-                "seed": seed,
-                "best_fitness_history": hist,
-                "best_fitness": best_f,
-                "n_evals": n_evals,
-            })
+            result["function"] = args.function_name
+            results.append(result)
 
-        # Adam
+        # Adam baseline
         if args.with_adam:
-            print(f"[run {run+1:02d}/{args.runs}] Adam baseline (seed={seed})")
-            best_f, hist, n_evals = run_adam(
+            print(f"[run {run+1:02d}/{args.runs}] Adam (seed={seed})")
+            
+            result = run_single_experiment(
                 problem=problem,
+                algorithm="Adam",
+                config="adam",
                 pop=args.pop,
                 max_evals=args.max_evals,
                 seed=seed,
                 device=device,
-                lr=args.adam_lr,
-                b1=args.adam_beta1,
-                b2=args.adam_beta2,
-                wd=args.adam_weight_decay,
+                device_str=device_str,
+                adam_params=adam_params,
             )
-            results.append({
-                "algorithm": "Adam",
-                "config": "baseline",
-                "function": args.function_name,
-                "seed": seed,
-                "best_fitness_history": hist,
-                "best_fitness": best_f,
-                "n_evals": n_evals,
-            })
+            result["function"] = args.function_name
+            results.append(result)
 
+    # Save results split by algorithm
     out_path = Path(args.out)
+    metadata = {
+        "n_features": args.n_features,
+        "n_informative": args.n_informative,
+        "noise": args.noise,
+        "hidden": args.hidden,
+        "ridge_alpha": args.ridge_alpha,
+        "lambda_sparsity": args.lambda_sparsity,
+        "pop_size": args.pop,
+        "n_regimes": args.n_regimes,
+        "shift_every": args.shift_every,
+        "overlap": args.overlap,
+        "cycle_regimes": args.cycle_regimes,
+    }
+    
     _split_and_write(
         out_path=out_path,
         n_var=args.n_features,
         max_evals=args.max_evals,
         n_runs=args.runs,
         results=results,
+        metadata=metadata,
     )
 
 
