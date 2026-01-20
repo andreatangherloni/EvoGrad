@@ -8,15 +8,41 @@ Runs EvoGrad algorithms in four configurations:
     3. Adaptive (adaptive=True, differentiable=False)
     4. Full (adaptive=True, differentiable=True)
 
+Also supports baselines (included by default when running evolutionary algorithms):
+    - pymoo: Reference implementation baseline (--no_pymoo to disable)
+    - Adam: Gradient-based optimizer baseline (--no_adam to disable)
+
+Function categories:
+    - Classical: Standard test functions (Sphere, Rosenbrock, Rastrigin, etc.)
+    - CEC 2017: Competition benchmark suite (F1-F30)
+    - Smoothed Funnel: Multi-basin problems designed for differentiable EAs
+
 Usage:
     python run_benchmark.py --algorithm DE --n_runs 30
     python run_benchmark.py --algorithm SHADE --suite cec2017 --n_var 10
     python run_benchmark.py --algorithm GA -D 10 --xl -100 --xu 100 --max_evals 50000
     
+    # Run only Adam optimizer
+    python run_benchmark.py -a ADAM -s quick -D 10 -r 30
+    python run_benchmark.py -a ADAM -s standard -D 10 --adam_lr 0.01
+    
+    # Run DE with all baselines (pymoo + Adam)
+    python run_benchmark.py -a DE -s quick -D 10 -r 5
+    
+    # Run DE without Adam baseline
+    python run_benchmark.py -a DE -s quick -D 10 -r 5 --no_adam
+    
+    # Run DE without pymoo baseline
+    python run_benchmark.py -a DE -s quick -D 10 -r 5 --no_pymoo
+    
     # CEC 2017 examples
     python run_benchmark.py -a DE -s cec2017_simple -D 10 -r 5    # F1-F10
     python run_benchmark.py -a DE -s cec2017_hybrid -D 10 -r 5    # F11-F20
     python run_benchmark.py -a DE -s cec2017 -D 10 -r 5           # All F1-F30
+    
+    # Smoothed funnel functions (designed for differentiable EAs)
+    python run_benchmark.py -a DE -s funnel -D 10 -r 30           # All funnel functions
+    python run_benchmark.py -a DE -f smoothedmultifunnel -D 10    # Single funnel function
 """
 
 from __future__ import annotations
@@ -42,7 +68,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -66,12 +92,28 @@ if str(EVOGRAD_PARENT) not in sys.path:
 
 import torch
 torch.set_num_threads(1)  # Limit PyTorch threads per process
+from torch import Tensor
 
 # Import benchmark functions from the functions subpackage
 from functions import (
     CLASSICAL_FUNCTIONS,
     ALL_FUNCTIONS,
 )
+
+# Import smoothed funnel functions
+SMOOTHED_FUNNEL_AVAILABLE = False
+SMOOTHED_FUNNEL_FUNCTIONS = {}
+try:
+    from functions.smoothed_funnel import (
+        SmoothedMultiFunnel,
+        MultiBasinRosenbrock,
+        DeceptiveLandscape,
+        SMOOTHED_FUNNEL_FUNCTIONS as _FUNNEL_FUNCS,
+    )
+    SMOOTHED_FUNNEL_FUNCTIONS = _FUNNEL_FUNCS
+    SMOOTHED_FUNNEL_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Smoothed funnel functions not available: {e}")
 
 # Import CEC 2017 functions
 CEC2017_AVAILABLE = False
@@ -143,8 +185,13 @@ SUITES = {
     "cec2017_composition": CEC2017_COMPOSITION,
     "cec2017_quick": ["cec2017_f1", "cec2017_f11", "cec2017_f21"],  # One from each category
     
+    # Smoothed funnel functions (designed for differentiable EAs)
+    "funnel": ["smoothedmultifunnel", "multibasinrosenbrock", "deceptivelandscape"],
+    "funnel_quick": ["smoothedmultifunnel"],
+    
     # Mixed suites
     "all": list(CLASSICAL_FUNCTIONS.keys()) + CEC2017_ALL,
+    "all_with_funnel": list(CLASSICAL_FUNCTIONS.keys()) + CEC2017_ALL + ["smoothedmultifunnel", "multibasinrosenbrock", "deceptivelandscape"],
 }
 
 
@@ -335,8 +382,9 @@ def get_function_instance(func_name: str, n_var: int, xl: float, xu: float):
     """
     Create a function instance from name.
     
-    Handles both classical functions and CEC 2017 functions.
+    Handles classical functions, CEC 2017 functions, and smoothed funnel functions.
     CEC 2017 functions use fixed bounds [-100, 100].
+    Smoothed funnel functions use default bounds [-5, 5].
     """
     # Check if it's a CEC 2017 function
     if func_name.startswith("cec2017_f"):
@@ -350,6 +398,15 @@ def get_function_instance(func_name: str, n_var: int, xl: float, xu: float):
         func_instance = get_cec2017_function(func_num, n_var=n_var)
         return func_instance
     
+    # Check if it's a smoothed funnel function
+    elif func_name in SMOOTHED_FUNNEL_FUNCTIONS:
+        if not SMOOTHED_FUNNEL_AVAILABLE:
+            raise ImportError("Smoothed funnel functions not available")
+        
+        func_class = SMOOTHED_FUNNEL_FUNCTIONS[func_name]
+        # Smoothed funnels use [-5, 5] by default, but respect user bounds
+        return func_class(n_var=n_var, xl=xl, xu=xu)
+    
     # Classical function
     elif func_name in CLASSICAL_FUNCTIONS:
         func_class = CLASSICAL_FUNCTIONS[func_name]
@@ -362,6 +419,97 @@ def get_function_instance(func_name: str, n_var: int, xl: float, xu: float):
     
     else:
         raise ValueError(f"Unknown function: {func_name}")
+
+
+# =============================================================================
+# Adam Optimizer Baseline
+# =============================================================================
+
+def run_adam_population(
+    func_instance,
+    n_var: int,
+    xl: float,
+    xu: float,
+    pop_size: int,
+    max_evals: int,
+    seed: int,
+    device: str,
+    lr: float = 0.05,
+    b1: float = 0.9,
+    b2: float = 0.999,
+    wd: float = 0.0,
+) -> Tuple[float, List[float], int, int, Optional[Tensor]]:
+    """
+    Run Adam optimizer on benchmark function.
+    
+    Optimizes directly in [xl, xu] space using projected gradient
+    descent. After each Adam update, values are clamped to maintain
+    feasibility. Uses multiple parallel "individuals" for fair 
+    comparison with population-based methods.
+    
+    Args:
+        func_instance: Benchmark function instance (callable).
+        n_var: Number of variables.
+        xl: Lower bound.
+        xu: Upper bound.
+        pop_size: Number of parallel solutions (for fair eval count comparison).
+        max_evals: Maximum fitness evaluations.
+        seed: Random seed.
+        device: Torch device string.
+        lr: Learning rate.
+        b1: Adam beta1 parameter.
+        b2: Adam beta2 parameter.
+        wd: Weight decay (L2 regularisation).
+        
+    Returns:
+        Tuple of (best_fitness, fitness_history, n_evaluations, n_generations, best_solution).
+    """
+    torch.manual_seed(seed)
+    dev = torch.device(device)
+    
+    # Initialize population uniformly in [xl, xu] (same as evolutionary algorithms)
+    x_init = torch.rand(pop_size, n_var, device=dev, dtype=torch.float32) * (xu - xl) + xl
+    x = x_init.clone().requires_grad_(True)
+    
+    opt = torch.optim.Adam([x], lr=lr, betas=(b1, b2), weight_decay=wd)
+
+    best = float("inf")
+    best_solution = None
+    hist = []
+    evals = 0
+    n_gen = 0
+
+    while evals < max_evals:
+        opt.zero_grad()
+        
+        # Evaluate fitness
+        f = func_instance(x)
+        
+        # Handle different output shapes
+        if f.dim() > 1:
+            f = f.squeeze()
+
+        # Backpropagate mean loss across population
+        loss = f.mean()
+        loss.backward()
+        opt.step()
+        
+        # Project back to feasible region [xl, xu]
+        with torch.no_grad():
+            x.clamp_(xl, xu)
+
+            # Track best solution
+            min_idx = f.argmin()
+            min_val = float(f[min_idx])
+            if min_val < best:
+                best = min_val
+                best_solution = x[min_idx].detach().clone()
+
+        hist.append(best)
+        evals += pop_size
+        n_gen += 1
+
+    return best, hist, evals, n_gen, best_solution
 
 
 # =============================================================================
@@ -533,6 +681,67 @@ def run_pymoo_single(
         )
 
 
+def run_adam_single(
+    func_name: str,
+    n_var: int,
+    xl: float,
+    xu: float,
+    seed: int,
+    max_evals: int,
+    pop_size: int,
+    device: str,
+    lr: float = 0.05,
+) -> RunResult:
+    """Run a single Adam optimization."""
+    _worker_init()  # Ensure thread limits in worker
+    
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    
+    start_time = time.time()
+    
+    try:
+        # Get function instance
+        func_instance = get_function_instance(func_name, n_var, xl, xu)
+        
+        # Get actual bounds from the instance
+        actual_xl = func_instance.xl[0].item()
+        actual_xu = func_instance.xu[0].item()
+        
+        # Run Adam
+        best_fitness, history, n_evals, n_gen, best_solution = run_adam_population(
+            func_instance=func_instance,
+            n_var=n_var,
+            xl=actual_xl,
+            xu=actual_xu,
+            pop_size=pop_size,
+            max_evals=max_evals,
+            seed=seed,
+            device=device,
+            lr=lr,
+        )
+        
+        return RunResult(
+            algorithm="ADAM", config="Adam", function=func_name,
+            n_var=n_var, seed=seed,
+            best_fitness_history=history,
+            best_fitness=best_fitness,
+            n_evals=n_evals,
+            n_gen=n_gen,
+            wall_time=time.time() - start_time,
+            success=True,
+        )
+        
+    except Exception as e:
+        import traceback
+        return RunResult(
+            algorithm="ADAM", config="Adam", function=func_name,
+            n_var=n_var, seed=seed, best_fitness_history=[], best_fitness=float('inf'),
+            n_evals=0, n_gen=0, wall_time=time.time() - start_time,
+            success=False, error_message=f"{str(e)}\n{traceback.format_exc()}",
+        )
+
+
 # =============================================================================
 # Parallel Execution
 # =============================================================================
@@ -543,6 +752,12 @@ def run_single_job(job: Dict[str, Any]) -> RunResult:
         return run_pymoo_single(
             job["algorithm"], job["function"], job["n_var"],
             job["xl"], job["xu"], job["seed"], job["max_evals"], job["pop_size"],
+        )
+    elif job["config"] == "Adam":
+        return run_adam_single(
+            job["function"], job["n_var"],
+            job["xl"], job["xu"], job["seed"], job["max_evals"], job["pop_size"],
+            job["device"], job.get("adam_lr", 0.05),
         )
     else:
         return run_evograd_single(
@@ -562,6 +777,8 @@ def run_benchmark_parallel(
     pop_size: int = 100,
     device: str = "cpu",
     include_pymoo: bool = True,
+    include_adam: bool = True,
+    adam_lr: float = 0.05,
     n_workers: int = -1,
 ) -> BenchmarkResults:
     """Run full benchmark suite in parallel."""
@@ -576,25 +793,45 @@ def run_benchmark_parallel(
         n_workers = cpu_count()
     n_workers = max(1, min(n_workers, cpu_count()))
     
-    configs = ["classical", "differentiable", "adaptive", "full"]
+    # Determine configs based on algorithm
+    is_adam = algorithm_name.upper() == "ADAM"
+    
+    if is_adam:
+        configs = ["Adam"]  # Adam only has one config
+    else:
+        configs = ["classical", "differentiable", "adaptive", "full"]
     
     # Build jobs
     jobs = []
     for func_name in functions:
         for config in configs:
             for seed in range(n_runs):
-                jobs.append({
+                job = {
                     "algorithm": algorithm_name, "config": config, "function": func_name,
                     "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
                     "max_evals": max_evals, "pop_size": pop_size, "device": device,
-                })
+                }
+                if is_adam:
+                    job["adam_lr"] = adam_lr
+                jobs.append(job)
         
-        if include_pymoo and PYMOO_AVAILABLE:
+        # Add pymoo baseline (not for Adam algorithm)
+        if include_pymoo and PYMOO_AVAILABLE and not is_adam:
             for seed in range(n_runs):
                 jobs.append({
                     "algorithm": algorithm_name, "config": "pymoo", "function": func_name,
                     "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
                     "max_evals": max_evals, "pop_size": pop_size, "device": "cpu",
+                })
+        
+        # Add Adam baseline (not for Adam algorithm)
+        if include_adam and not is_adam:
+            for seed in range(n_runs):
+                jobs.append({
+                    "algorithm": algorithm_name, "config": "Adam", "function": func_name,
+                    "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
+                    "max_evals": max_evals, "pop_size": pop_size, "device": device,
+                    "adam_lr": adam_lr,
                 })
     
     total = len(jobs)
@@ -603,11 +840,31 @@ def run_benchmark_parallel(
     n_cec2017 = sum(1 for f in functions if f.startswith("cec2017_"))
     n_classical = len(functions) - n_cec2017
     
+    # Count configs
+    n_configs = len(configs)
+    if include_pymoo and PYMOO_AVAILABLE and not is_adam:
+        n_configs += 1
+    if include_adam and not is_adam:
+        n_configs += 1
+    
     print(f"\n{'='*70}")
     print(f"EvoGrad Parallel Benchmark Suite")
     print(f"{'='*70}")
     print(f"Algorithm:    {algorithm_name}")
     print(f"Functions:    {len(functions)} ({n_classical} classical, {n_cec2017} CEC2017)")
+    if is_adam:
+        print(f"Configs:      {n_configs} (Adam gradient-based)")
+        print(f"Adam LR:      {adam_lr}")
+    else:
+        baselines = []
+        if include_pymoo and PYMOO_AVAILABLE:
+            baselines.append("pymoo")
+        if include_adam:
+            baselines.append("Adam")
+        baseline_str = f", baselines: {', '.join(baselines)}" if baselines else ""
+        print(f"Configs:      {n_configs} (EvoGrad: 4{baseline_str})")
+        if include_adam:
+            print(f"Adam LR:      {adam_lr}")
     print(f"D (n_var):    {n_var}")
     print(f"Bounds:       [{xl}, {xu}] (CEC2017 uses [-100, 100])")
     print(f"Max evals:    {max_evals}")
@@ -617,7 +874,7 @@ def run_benchmark_parallel(
     print(f"Device:       {device}")
     print(f"{'='*70}\n")
     
-    if not EVOGRAD_AVAILABLE:
+    if not EVOGRAD_AVAILABLE and not is_adam:
         print(f"WARNING: EvoGrad not available - {EVOGRAD_IMPORT_ERROR}\n")
     
     if n_cec2017 > 0 and not CEC2017_AVAILABLE:
@@ -680,7 +937,9 @@ def print_summary(results: BenchmarkResults):
             print(f"{'Config':<15} {'Best':>12} {'Mean':>12} {'Std':>12} {'Time':>8}")
             print("-" * 70)
             
-            for config in ["classical", "differentiable", "adaptive", "full", "pymoo"]:
+            # Order: classical, differentiable, adaptive, full, Adam, pymoo
+            config_order = ["classical", "differentiable", "adaptive", "full", "Adam", "pymoo"]
+            for config in config_order:
                 if config in summary[func]:
                     s = summary[func][config]
                     print(f"{config:<15} {s['best']:>12.4e} {s['mean']:>12.4e} "
@@ -702,8 +961,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Quick test with 3 classical functions
+  # Quick test with 3 classical functions (includes pymoo + Adam baselines)
   python run_benchmark.py -a DE -s quick -D 10 -r 5
+  
+  # Run without Adam baseline
+  python run_benchmark.py -a DE -s quick -D 10 -r 5 --no_adam
+  
+  # Run without pymoo baseline
+  python run_benchmark.py -a DE -s quick -D 10 -r 5 --no_pymoo
+  
+  # Run only Adam optimizer
+  python run_benchmark.py -a ADAM -s quick -D 10 -r 30
+  
+  # Adam with custom learning rate
+  python run_benchmark.py -a ADAM -s standard -D 10 --adam_lr 0.01
   
   # CEC 2017 simple functions (F1-F10)
   python run_benchmark.py -a DE -s cec2017_simple -D 10 -r 30
@@ -711,13 +982,20 @@ Examples:
   # CEC 2017 all functions (F1-F30)
   python run_benchmark.py -a SHADE -s cec2017 -D 10 -r 30
   
+  # Smoothed funnel functions (designed for differentiable EAs)
+  python run_benchmark.py -a DE -s funnel -D 10 -r 30
+  
+  # Single funnel function (best for demonstrating EvoGrad advantages)
+  python run_benchmark.py -a DE -f smoothedmultifunnel -D 10 -r 30
+  
   # Specific functions
-  python run_benchmark.py -a DE -f sphere rastrigin cec2017_f1 cec2017_f11 -D 10 -r 10
+  python run_benchmark.py -a DE -f sphere rastrigin cec2017_f1 smoothedmultifunnel -D 10 -r 10
         """,
     )
     
     parser.add_argument("-a", "--algorithm", type=str, default="DE",
-                        choices=["DE", "SHADE", "PSO", "GA", "CMAES"])
+                        choices=["DE", "SHADE", "PSO", "GA", "CMAES", "ADAM"],
+                        help="Algorithm to benchmark (ADAM for gradient-based only)")
     parser.add_argument("-s", "--suite", type=str, default="standard",
                         choices=list(SUITES.keys()),
                         help="Function suite to benchmark")
@@ -741,6 +1019,10 @@ Examples:
                         help="Parallel workers (-1 for all CPUs)")
     parser.add_argument("--no_pymoo", action="store_true",
                         help="Disable pymoo baseline comparison")
+    parser.add_argument("--no_adam", action="store_true",
+                        help="Disable Adam baseline comparison")
+    parser.add_argument("--adam_lr", type=float, default=0.05,
+                        help="Adam learning rate (default: 0.05)")
     parser.add_argument("-o", "--output_dir", type=str, default="results",
                         help="Output directory for results")
     parser.add_argument("--list_functions", action="store_true",
@@ -761,9 +1043,23 @@ Examples:
                 category = "simple" if i <= 10 else ("hybrid" if i <= 20 else "composition")
                 print(f"  cec2017_f{i} ({category})")
         
+        if SMOOTHED_FUNNEL_AVAILABLE:
+            print("\nSmoothed Funnel (designed for differentiable EAs):")
+            print("  smoothedmultifunnel   - Two funnels: wide distractor + narrow Rosenbrock")
+            print("  multibasinrosenbrock  - Multiple smoothed Rosenbrock basins")
+            print("  deceptivelandscape    - Configurable deceptive multi-basin")
+        
         print("\nSuites:")
         for suite_name, funcs in SUITES.items():
             print(f"  {suite_name}: {len(funcs)} functions")
+        
+        print("\nAlgorithms:")
+        print("  DE, SHADE, PSO, GA, CMAES - Evolutionary algorithms (4 configs + baselines)")
+        print("  ADAM - Gradient-based optimizer (standalone)")
+        
+        print("\nBaselines (for evolutionary algorithms):")
+        print("  pymoo - Reference implementation (--no_pymoo to disable)")
+        print("  Adam  - Gradient-based baseline (--no_adam to disable)")
         
         sys.exit(0)
     
@@ -774,6 +1070,8 @@ Examples:
     available = set(CLASSICAL_FUNCTIONS.keys())
     if CEC2017_AVAILABLE:
         available.update(f"cec2017_f{i}" for i in range(1, 31))
+    if SMOOTHED_FUNNEL_AVAILABLE:
+        available.update(SMOOTHED_FUNNEL_FUNCTIONS.keys())
     
     functions = [f for f in functions if f in available]
     
@@ -808,6 +1106,8 @@ Examples:
         pop_size=args.pop_size,
         device=args.device,
         include_pymoo=not args.no_pymoo,
+        include_adam=not args.no_adam,
+        adam_lr=args.adam_lr,
         n_workers=args.workers,
     )
     

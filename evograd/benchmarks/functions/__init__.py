@@ -7,11 +7,13 @@ testing and comparing optimization algorithms.
 Categories:
 - Classical: Standard test functions (Sphere, Rosenbrock, Rastrigin, etc.)
 - CEC 2017: Competition benchmark suite (F1-F30)
+- Smoothed Funnel: Multi-basin problems designed for differentiable EAs
 - Transforms: Wrappers for creating shifted/rotated variants
 
 Usage:
     >>> from evograd.benchmarks.functions import Sphere, Rastrigin
     >>> from evograd.benchmarks.functions import CEC2017_F1, get_cec2017_function
+    >>> from evograd.benchmarks.functions import SmoothedMultiFunnel
     >>> 
     >>> # Create function with default bounds
     >>> sphere = Sphere(n_var=30)
@@ -29,6 +31,9 @@ Usage:
     >>> # CEC 2017 functions
     >>> f1 = CEC2017_F1(n_var=10)
     >>> f15 = get_cec2017_function(15, n_var=10)
+    >>>
+    >>> # Smoothed multi-funnel (designed for differentiable EAs)
+    >>> funnel = SmoothedMultiFunnel(n_var=10, tau=1.0, delta=10.0)
 """
 
 from .base import BenchmarkFunction, CompositeFunction
@@ -116,10 +121,24 @@ from .cec2017 import (
     get_function as get_cec2017_function,
 )
 
+# Smoothed Multi-Funnel Functions (designed for differentiable EAs)
+from .smoothed_funnel import (
+    # Core utilities
+    log_sum_exp_min,
+    random_orthogonal_matrix,
+    # Benchmark functions
+    SmoothedMultiFunnel,
+    MultiBasinRosenbrock,
+    DeceptiveLandscape,
+    # Registry
+    SMOOTHED_FUNNEL_FUNCTIONS,
+)
+
 # Combined registry of all functions
 ALL_FUNCTIONS = {
     **CLASSICAL_FUNCTIONS,
     **CEC2017_FUNCTIONS,
+    **SMOOTHED_FUNNEL_FUNCTIONS,
 }
 
 __all__ = [
@@ -197,6 +216,13 @@ __all__ = [
     "CEC2017_FUNCTIONS",
     "ALL_CEC2017_CLASSES",
     "get_cec2017_function",
+    # Smoothed Multi-Funnel (for differentiable EAs)
+    "log_sum_exp_min",
+    "random_orthogonal_matrix",
+    "SmoothedMultiFunnel",
+    "MultiBasinRosenbrock",
+    "DeceptiveLandscape",
+    "SMOOTHED_FUNNEL_FUNCTIONS",
     # Registries
     "CLASSICAL_FUNCTIONS",
     "ALL_FUNCTIONS",
