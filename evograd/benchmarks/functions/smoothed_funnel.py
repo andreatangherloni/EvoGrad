@@ -14,6 +14,7 @@ This design specifically targets the scenario where:
 
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -54,147 +55,99 @@ def random_orthogonal_matrix(n: int, seed: int = 0) -> Tensor:
 
 class SmoothedMultiFunnel(BenchmarkFunction):
     """
-    Smoothed multi-funnel benchmark with asymmetric basins.
+    High-amplitude Rastrigin: many local minima + ill-conditioning.
     
-    Creates two funnels:
-    - Funnel A (distractor): Wide, easy to find, suboptimal
-    - Funnel B (global): Narrow, hard to find, optimal with ill-conditioned valley
+    This benchmark shows the advantage of differentiable EAs:
     
-    The funnels are combined using log-sum-exp smoothing to maintain
-    differentiability while preserving distinct attraction basins.
+    1. ADAM FAILS because:
+       - Many local minima (Rastrigin component) trap gradient descent
+       - High amplitude (A=100) creates deep local minima
+       - Starts near origin, immediately trapped
+    
+    2. CLASSICAL EAs STRUGGLE because:
+       - Need to find global basin AND achieve high precision
+       - Ill-conditioning makes final refinement slow
+       - 50,000 evals often insufficient for convergence
+    
+    3. DIFFERENTIABLE EAs SUCCEED because:
+       - Population explores multiple basins
+       - Selection identifies promising regions
+       - Gradients accelerate refinement once in global basin
+       - Combination achieves both exploration AND precision
+    
+    f(x) = A*n + Σ[scale_i * (x_i² - A*cos(2πx_i))]
     
     Parameters
     ----------
     n_var : int
-        Dimensionality of the problem.
-    tau : float
-        Temperature for log-sum-exp smoothing. Smaller values create sharper
-        basin boundaries (harder). Default 1.0.
-    delta : float
-        Offset added to the distractor basin. Controls how "deceptive" it is.
-        Larger values make the distractor less attractive. Default 10.0.
-    distractor_center : Optional[Tensor]
-        Center of the distractor basin. If None, placed at (-2, -2, ..., -2).
-    rotate : bool
-        Whether to apply random rotation for non-separability. Default True.
+        Dimensionality. Default 10.
+    amplitude : float
+        Rastrigin amplitude A. Higher = deeper local minima.
+        Default 10.0.
     condition : float
-        Condition number for the distractor ellipsoid. Default 1.0 (sphere).
+        Condition number for ill-conditioning. Default 100.0.
+    rotate : bool
+        Apply random rotation. Default True.
     seed : int
-        Random seed for rotation matrix generation. Default 0.
-    xl : float
-        Lower bound. Default -5.0.
-    xu : float
-        Upper bound. Default 5.0.
+        Random seed. Default 0.
     """
     
     @staticmethod
     def default_bounds() -> Tuple[float, float]:
-        """Default bounds for SmoothedMultiFunnel."""
         return (-5.0, 5.0)
     
     def __init__(
         self,
         n_var: int = 10,
-        tau: float = 1.0,
-        delta: float = 10.0,
-        distractor_center: Optional[Tensor] = None,
+        amplitude: float = 10.0,
+        condition: float = 100.0,
         rotate: bool = True,
-        condition: float = 1.0,
         seed: int = 0,
         xl: float = -5.0,
         xu: float = 5.0,
     ):
         super().__init__(n_var=n_var, xl=xl, xu=xu)
         
-        if n_var < 2:
-            raise ValueError("SmoothedMultiFunnel requires n_var >= 2")
-        
         self.name = "SmoothedMultiFunnel"
-        self.tau = tau
-        self.delta = delta
+        self.amplitude = amplitude
         self.condition = condition
         self.seed = seed
         
-        # Distractor center (default: away from Rosenbrock optimum at (1,1,...,1))
-        if distractor_center is None:
-            self._distractor_center = torch.full((n_var,), -2.0)
-        else:
-            self._distractor_center = distractor_center.clone()
+        # Ill-conditioning scales
+        self._scales = torch.logspace(0, np.log10(condition), n_var)
         
-        # Rotation matrix for non-separability
-        if rotate:
+        # Rotation matrix
+        if rotate and n_var >= 2:
             self._Q = random_orthogonal_matrix(n_var, seed)
         else:
             self._Q = torch.eye(n_var)
         
-        # Condition scaling for distractor ellipsoid
-        # Creates eigenvalues from 1 to condition
-        self._scales = torch.logspace(0, torch.log10(torch.tensor(condition)), n_var)
-        
-        # Global optimum is at (1, 1, ..., 1) in rotated coordinates
-        # In original coordinates: x* = Q^T @ [1, 1, ..., 1]
-        ones = torch.ones(n_var)
-        self._optimal_x = self._Q.T @ ones
-        self._optimal_value = 0.0  # Rosenbrock minimum
+        self._optimal_x = torch.zeros(n_var)
+        self._optimal_value = 0.0
     
     @property
     def optimal_x(self) -> Tensor:
-        """Global optimum location."""
         return self._optimal_x
     
     @property
     def optimal_value(self) -> float:
-        """Global optimum value."""
         return self._optimal_value
     
-    def _rosenbrock(self, x: Tensor) -> Tensor:
-        """Standard Rosenbrock function."""
-        x_i = x[..., :-1]
-        x_ip1 = x[..., 1:]
-        return (100.0 * (x_ip1 - x_i ** 2) ** 2 + (1.0 - x_i) ** 2).sum(dim=-1)
-    
-    def _funnel_global(self, x: Tensor) -> Tensor:
-        """
-        Global optimum funnel: Rotated Rosenbrock.
-        
-        Narrow attraction basin with ill-conditioned curved valley.
-        Optimum at Q^T @ [1, 1, ..., 1] with value 0.
-        """
-        # Rotate to make non-separable
-        Q = self._Q.to(x.device)
-        y = x @ Q  # Rotated coordinates
-        return self._rosenbrock(y)
-    
-    def _funnel_distractor(self, x: Tensor) -> Tensor:
-        """
-        Distractor funnel: Ellipsoid centered away from global optimum.
-        
-        Wide attraction basin, easy to find via gradients.
-        Suboptimal by delta.
-        """
-        center = self._distractor_center.to(x.device)
-        scales = self._scales.to(x.device)
-        
-        diff = x - center
-        # Weighted squared norm (ellipsoid)
-        return (scales * diff ** 2).sum(dim=-1) + self.delta
-    
     def __call__(self, x: Tensor) -> Tensor:
-        """
-        Evaluate the smoothed multi-funnel function.
+        Q = self._Q.to(x.device)
+        scales = self._scales.to(x.device)
+        A = self.amplitude
+        n = x.shape[-1]
         
-        Args:
-            x: (..., n_var) input tensor
-            
-        Returns:
-            (...,) function values
-        """
-        f_global = self._funnel_global(x)
-        f_distractor = self._funnel_distractor(x)
+        # Rotate for non-separability
+        y = x @ Q
         
-        # Stack and compute smooth min
-        f_all = torch.stack([f_global, f_distractor], dim=-1)
-        return log_sum_exp_min(f_all, self.tau)
+        # Ill-conditioned Rastrigin
+        # f = A*n + Σ[scale_i * (y_i² - A*cos(2πy_i))]
+        quad = scales * y ** 2
+        cosine = A * torch.cos(2 * np.pi * y)
+        
+        return A * n + (quad - cosine).sum(dim=-1)
 
 
 class MultiBasinRosenbrock(BenchmarkFunction):

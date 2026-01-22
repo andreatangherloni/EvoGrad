@@ -243,26 +243,7 @@ class HistoryCallback(Callback):
         # Timing
         self._start_time: Optional[float] = None
     
-    def on_optimisation_start(self, state: CallbackState) -> None:
-        """Reset history and start timer."""
-        self._start_time = time.perf_counter()
-        
-        # Clear all lists
-        self.best_fitness.clear()
-        self.best_solution.clear()
-        self.n_evals.clear()
-        self.elapsed_time.clear()
-        self.generations.clear()
-        self.mean_fitness.clear()
-        self.std_fitness.clear()
-        self.min_fitness.clear()
-        self.max_fitness.clear()
-        self.hyperparams.clear()
-        self.populations.clear()
-        self.diversity.clear()
-    
-    def on_generation_end(self, state: CallbackState) -> None:
-        """Record metrics at end of generation."""
+    def _record_metrics(self, state: CallbackState) -> None:
         # Core metrics
         self.generations.append(state.generation)
         self.best_fitness.append(float(state.best_fitness))
@@ -301,6 +282,30 @@ class HistoryCallback(Callback):
         if self.track_diversity and state.current_population is not None:
             div = self._compute_diversity(state.current_population)
             self.diversity.append(div)
+    
+    def on_optimisation_start(self, state: CallbackState) -> None:
+        """Reset history and start timer."""
+        self._start_time = time.perf_counter()
+        
+        # Clear all lists
+        self.best_fitness.clear()
+        self.best_solution.clear()
+        self.n_evals.clear()
+        self.elapsed_time.clear()
+        self.generations.clear()
+        self.mean_fitness.clear()
+        self.std_fitness.clear()
+        self.min_fitness.clear()
+        self.max_fitness.clear()
+        self.hyperparams.clear()
+        self.populations.clear()
+        self.diversity.clear()
+        
+        self._record_metrics(state)
+    
+    def on_generation_end(self, state: CallbackState) -> None:
+        """Record metrics at end of generation or initialization."""
+        self._record_metrics(state)
     
     def _compute_diversity(self, population: Tensor) -> float:
         """
@@ -629,23 +634,7 @@ class PrintCallback(Callback):
         
         self._start_time: Optional[float] = None
     
-    def on_optimisation_start(self, state: CallbackState) -> None:
-        """Record start time and print header."""
-        self._start_time = time.perf_counter()
-        
-        # Print header
-        header = "Gen"
-        header += " | Best Fitness"
-        if self.show_evals:
-            header += " | Evals"
-        if self.show_time:
-            header += " | Time"
-        
-        print("-" * len(header))
-        print(header)
-        print("-" * len(header))
-    
-    def on_generation_end(self, state: CallbackState) -> None:
+    def _report_generation(self, state: CallbackState) -> None:
         """Print progress if at print interval."""
         if state.generation % self.every != 0:
             return
@@ -669,6 +658,29 @@ class PrintCallback(Callback):
             parts.append(f"HP: {hp_str}")
         
         print(" | ".join(parts))
+    
+    
+    def on_optimisation_start(self, state: CallbackState) -> None:
+        """Record start time, print header, and print initilization"""
+        self._start_time = time.perf_counter()
+        
+        # Print header
+        header = "Gen"
+        header += " | Best Fitness"
+        if self.show_evals:
+            header += " | Evals"
+        if self.show_time:
+            header += " | Time"
+        
+        print("-" * len(header))
+        print(header)
+        print("-" * len(header))
+        
+        self._report_generation(state)
+    
+    def on_generation_end(self, state: CallbackState) -> None:
+        """Print progress after each generation"""
+        self._report_generation(state)
     
     def on_optimisation_end(self, state: CallbackState) -> None:
         """Print final summary."""
