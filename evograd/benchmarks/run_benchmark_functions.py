@@ -42,7 +42,7 @@ Usage:
     
     # Smoothed funnel functions (designed for differentiable EAs)
     python run_benchmark.py -a DE -s funnel -D 10 -r 30           # All funnel functions
-    python run_benchmark.py -a DE -f smoothedmultifunnel -D 10    # Single funnel function
+    python run_benchmark.py -a DE -f multibasinrastrigin -D 10    # Single funnel function
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ import json
 import sys
 import time
 import warnings
+import numpy as np
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -70,7 +71,8 @@ from multiprocessing import cpu_count
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
+import torch
+from torch import Tensor
 
 warnings.filterwarnings('ignore')
 
@@ -90,9 +92,7 @@ if str(SCRIPT_DIR) not in sys.path:
 if str(EVOGRAD_PARENT) not in sys.path:
     sys.path.insert(0, str(EVOGRAD_PARENT))  # For 'evograd' package
 
-import torch
 torch.set_num_threads(1)  # Limit PyTorch threads per process
-from torch import Tensor
 
 # Import benchmark functions from the functions subpackage
 from functions import (
@@ -105,7 +105,7 @@ SMOOTHED_FUNNEL_AVAILABLE = False
 SMOOTHED_FUNNEL_FUNCTIONS = {}
 try:
     from functions.smoothed_funnel import (
-        SmoothedMultiFunnel,
+        MultiBasinRastrigin,
         MultiBasinRosenbrock,
         DeceptiveLandscape,
         SMOOTHED_FUNNEL_FUNCTIONS as _FUNNEL_FUNCS,
@@ -186,12 +186,12 @@ SUITES = {
     "cec2017_quick": ["cec2017_f1", "cec2017_f11", "cec2017_f21"],  # One from each category
     
     # Smoothed funnel functions (designed for differentiable EAs)
-    "funnel": ["smoothedmultifunnel", "multibasinrosenbrock", "deceptivelandscape"],
-    "funnel_quick": ["smoothedmultifunnel"],
+    "funnel": ["multibasinrastrigin", "multibasinrosenbrock", "deceptivelandscape"],
+    "funnel_quick": ["multibasinrastrigin"],
     
     # Mixed suites
     "all": list(CLASSICAL_FUNCTIONS.keys()) + CEC2017_ALL,
-    "all_with_funnel": list(CLASSICAL_FUNCTIONS.keys()) + CEC2017_ALL + ["smoothedmultifunnel", "multibasinrosenbrock", "deceptivelandscape"],
+    "all_with_funnel": list(CLASSICAL_FUNCTIONS.keys()) + CEC2017_ALL + ["multibasinrastrigin", "multibasinrosenbrock", "deceptivelandscape"],
 }
 
 
@@ -986,10 +986,10 @@ Examples:
   python run_benchmark.py -a DE -s funnel -D 10 -r 30
   
   # Single funnel function (best for demonstrating EvoGrad advantages)
-  python run_benchmark.py -a DE -f smoothedmultifunnel -D 10 -r 30
+  python run_benchmark.py -a DE -f multibasinrastrigin -D 10 -r 30
   
   # Specific functions
-  python run_benchmark.py -a DE -f sphere rastrigin cec2017_f1 smoothedmultifunnel -D 10 -r 10
+  python run_benchmark.py -a DE -f sphere rastrigin cec2017_f1 multibasinrastrigin -D 10 -r 10
         """,
     )
     
@@ -1045,7 +1045,7 @@ Examples:
         
         if SMOOTHED_FUNNEL_AVAILABLE:
             print("\nSmoothed Funnel (designed for differentiable EAs):")
-            print("  smoothedmultifunnel   - Two funnels: wide distractor + narrow Rosenbrock")
+            print("  multibasinrastrigin   - Multiple smoothed Rastrigin basins")
             print("  multibasinrosenbrock  - Multiple smoothed Rosenbrock basins")
             print("  deceptivelandscape    - Configurable deceptive multi-basin")
         

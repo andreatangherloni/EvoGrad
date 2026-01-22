@@ -13,8 +13,8 @@ This design specifically targets the scenario where:
 """
 
 from typing import Optional, Tuple
+import math
 
-import numpy as np
 import torch
 from torch import Tensor
 
@@ -53,43 +53,41 @@ def random_orthogonal_matrix(n: int, seed: int = 0) -> Tensor:
     return Q
 
 
-class SmoothedMultiFunnel(BenchmarkFunction):
+class MultiBasinRastrigin(BenchmarkFunction):
     """
-    High-amplitude Rastrigin: many local minima + ill-conditioning.
+    Multi-basin Rastrigin: multiple attraction basins combined with log-sum-exp.
     
-    This benchmark shows the advantage of differentiable EAs:
+    Creates K Rastrigin basins at different centers with different offsets.
+    The basins are combined using log-sum-exp smoothing, creating a landscape
+    where gradient descent gets trapped in the nearest basin, but population-based
+    search can discover the global optimum.
     
-    1. ADAM FAILS because:
-       - Many local minima (Rastrigin component) trap gradient descent
-       - High amplitude (A=100) creates deep local minima
-       - Starts near origin, immediately trapped
+    Key properties:
+    - Each basin has Rastrigin's characteristic local minima structure
+    - Basins are smoothly connected (differentiable everywhere)
+    - Global basin has offset=0, distractor basins have offset>0
+    - From most starting points, gradients lead to a distractor
     
-    2. CLASSICAL EAs STRUGGLE because:
-       - Need to find global basin AND achieve high precision
-       - Ill-conditioning makes final refinement slow
-       - 50,000 evals often insufficient for convergence
+    f(x) = -τ·log(Σₖ exp(-fₖ(x)/τ))
     
-    3. DIFFERENTIABLE EAs SUCCEED because:
-       - Population explores multiple basins
-       - Selection identifies promising regions
-       - Gradients accelerate refinement once in global basin
-       - Combination achieves both exploration AND precision
-    
-    f(x) = A*n + Σ[scale_i * (x_i² - A*cos(2πx_i))]
+    where fₖ(x) = A·n + Σᵢ[(xᵢ - cₖᵢ)² - A·cos(2π(xᵢ - cₖᵢ))] + δₖ
     
     Parameters
     ----------
     n_var : int
         Dimensionality. Default 10.
+    n_basins : int
+        Number of basins. Default 3.
     amplitude : float
-        Rastrigin amplitude A. Higher = deeper local minima.
-        Default 10.0.
-    condition : float
-        Condition number for ill-conditioning. Default 100.0.
-    rotate : bool
-        Apply random rotation. Default True.
+        Rastrigin amplitude A. Default 10.0.
+    tau : float
+        Smoothing temperature. Smaller = sharper basin boundaries. Default 1.0.
+    basin_separation : float
+        Distance between basin centers. Default 4.0.
+    distractor_offset : float
+        Minimum offset for distractor basins. Default 5.0.
     seed : int
-        Random seed. Default 0.
+        Random seed for basin placement. Default 0.
     """
     
     @staticmethod
@@ -99,30 +97,53 @@ class SmoothedMultiFunnel(BenchmarkFunction):
     def __init__(
         self,
         n_var: int = 10,
+        n_basins: int = 3,
         amplitude: float = 10.0,
-        condition: float = 100.0,
-        rotate: bool = True,
+        tau: float = 1.0,
+        basin_separation: float = 4.0,
+        distractor_offset: float = 5.0,
         seed: int = 0,
         xl: float = -5.0,
         xu: float = 5.0,
     ):
         super().__init__(n_var=n_var, xl=xl, xu=xu)
         
-        self.name = "SmoothedMultiFunnel"
+        self.name = "MultiBasinRastrigin"
+        self.n_basins = n_basins
         self.amplitude = amplitude
-        self.condition = condition
+        self.tau = tau
         self.seed = seed
         
-        # Ill-conditioning scales
-        self._scales = torch.logspace(0, np.log10(condition), n_var)
+        torch.manual_seed(seed)
         
-        # Rotation matrix
-        if rotate and n_var >= 2:
-            self._Q = random_orthogonal_matrix(n_var, seed)
-        else:
-            self._Q = torch.eye(n_var)
+        # Basin centers: global at origin, distractors spread around
+        self._centers = torch.zeros(n_basins, n_var)
         
-        self._optimal_x = torch.zeros(n_var)
+        # Global basin at origin
+        self._centers[0] = torch.zeros(n_var)
+        
+        # Distractor basins: placed at corners/edges of search space
+        # This ensures they capture random initializations
+        if n_basins >= 2:
+            # First distractor: negative quadrant (captures ~half of random inits)
+            self._centers[1] = torch.full((n_var,), -basin_separation / 2)
+        
+        if n_basins >= 3:
+            # Second distractor: positive quadrant
+            self._centers[2] = torch.full((n_var,), basin_separation / 2)
+        
+        # Additional distractors at random positions
+        for k in range(3, n_basins):
+            direction = torch.randn(n_var)
+            direction = direction / direction.norm()
+            self._centers[k] = direction * basin_separation
+        
+        # Basin offsets: global=0, distractors>0
+        self._offsets = torch.zeros(n_basins)
+        self._offsets[1:] = distractor_offset + torch.rand(n_basins - 1) * distractor_offset
+        
+        # Global optimum
+        self._optimal_x = self._centers[0].clone()
         self._optimal_value = 0.0
     
     @property
@@ -133,21 +154,34 @@ class SmoothedMultiFunnel(BenchmarkFunction):
     def optimal_value(self) -> float:
         return self._optimal_value
     
-    def __call__(self, x: Tensor) -> Tensor:
-        Q = self._Q.to(x.device)
-        scales = self._scales.to(x.device)
+    def _rastrigin(self, x: Tensor, center: Tensor) -> Tensor:
+        """Rastrigin function centered at given point."""
         A = self.amplitude
-        n = x.shape[-1]
+        diff = x - center.to(x.device)
+        n = diff.shape[-1]
         
-        # Rotate for non-separability
-        y = x @ Q
+        quad = (diff ** 2).sum(dim=-1)
+        cosine = (A * torch.cos(2 * math.pi * diff)).sum(dim=-1)
         
-        # Ill-conditioned Rastrigin
-        # f = A*n + Σ[scale_i * (y_i² - A*cos(2πy_i))]
-        quad = scales * y ** 2
-        cosine = A * torch.cos(2 * np.pi * y)
+        return A * n + quad - cosine
+    
+    def __call__(self, x: Tensor) -> Tensor:
+        """Evaluate multi-basin Rastrigin with log-sum-exp smoothing."""
+        centers = self._centers.to(x.device)
+        offsets = self._offsets.to(x.device)
         
-        return A * n + (quad - cosine).sum(dim=-1)
+        # Compute Rastrigin value for each basin
+        # x: (..., n_var), centers: (n_basins, n_var)
+        f_basins = []
+        for k in range(self.n_basins):
+            f_k = self._rastrigin(x, centers[k]) + offsets[k]
+            f_basins.append(f_k)
+        
+        # Stack: (..., n_basins)
+        f_all = torch.stack(f_basins, dim=-1)
+        
+        # Smooth min via log-sum-exp
+        return log_sum_exp_min(f_all, self.tau)
 
 
 class MultiBasinRosenbrock(BenchmarkFunction):
@@ -436,7 +470,7 @@ class DeceptiveLandscape(BenchmarkFunction):
 
 # Registry
 SMOOTHED_FUNNEL_FUNCTIONS = {
-    "smoothedmultifunnel": SmoothedMultiFunnel,
+    "multibasinrastrigin": MultiBasinRastrigin,
     "multibasinrosenbrock": MultiBasinRosenbrock,
     "deceptivelandscape": DeceptiveLandscape,
 }
