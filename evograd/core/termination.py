@@ -594,7 +594,7 @@ def default_termination(
         criteria.append(TimeLimit(time_limit))
     
     if not criteria:
-        raise ValueError("At least one termination criterion must be specified")
+        return MaxEvaluations(10000)
     
     if len(criteria) == 1:
         return criteria[0]

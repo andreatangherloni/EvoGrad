@@ -137,7 +137,7 @@ def minimize(
         
         # Differentiable mode options (used if learnable params exist):
         optimizer: PyTorch optimizer for gradient-based updates.
-            If None, Adam is used with specified lr.
+            If None, SGD is used with specified lr.
         lr: Learning rate for gradient-based updates (default: 0.01).
         grad_clip: Maximum gradient norm for clipping (None = no clipping).
         scheduler: Learning rate scheduler type:
@@ -223,7 +223,7 @@ def minimize(
     if use_backprop:
         # Create optimizer if not provided
         if optimizer is None:
-            optimizer = torch.optim.Adam(learnable_params, lr=lr)
+            optimizer = torch.optim.SGD(learnable_params, lr=lr)
         
         # Create LR scheduler
         lr_scheduler = _create_scheduler(
@@ -483,6 +483,9 @@ def _step_differentiable(
     Returns:
         Loss value (best fitness).
     """
+    if algorithm.differentiable:
+        algorithm.population.requires_grad_(True)
+    
     # Zero gradients
     optimizer.zero_grad(set_to_none=True)
     
