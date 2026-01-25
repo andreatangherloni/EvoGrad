@@ -170,7 +170,7 @@ except ImportError as e:
 CEC2017_SIMPLE = [f"cec2017_f{i}" for i in range(1, 11)]      # F1-F10
 CEC2017_HYBRID = [f"cec2017_f{i}" for i in range(11, 21)]     # F11-F20
 CEC2017_COMPOSITION = [f"cec2017_f{i}" for i in range(21, 31)] # F21-F30
-CEC2017_ALL = [f"cec2017_f{i}" for i in range(1, 31)]          # F1-F30
+CEC2017_ALL = [f"cec2017_f{i}" for i in range(1, 31) if i != 2]          # F1-F30
 
 SUITES = {
     # Classical functions
@@ -344,7 +344,7 @@ def create_evograd_algorithm(algorithm_name: str, config: str, pop_size: int, de
         )
     
     elif name == "CMAES":
-        return CMAES(pop_size=pop_size, sigma=0.5, adaptive=adaptive, differentiable=differentiable, device=device, seed=seed)
+        return CMAES(pop_size=pop_size, sigma=0.5, adaptive=adaptive, differentiable=differentiable, device=device, seed=seed, bipop=True, restarts=9)
     
     else:
         raise ValueError(f"Unknown algorithm: {algorithm_name}")
