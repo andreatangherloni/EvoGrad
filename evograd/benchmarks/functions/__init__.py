@@ -127,7 +127,7 @@ from .smoothed_funnel import (
     log_sum_exp_min,
     random_orthogonal_matrix,
     # Benchmark functions
-    SmoothedMultiFunnel,
+    MultiBasinRastrigin,
     MultiBasinRosenbrock,
     DeceptiveLandscape,
     # Registry
@@ -219,7 +219,7 @@ __all__ = [
     # Smoothed Multi-Funnel (for differentiable EAs)
     "log_sum_exp_min",
     "random_orthogonal_matrix",
-    "SmoothedMultiFunnel",
+    "MultiBasinRastrigin",
     "MultiBasinRosenbrock",
     "DeceptiveLandscape",
     "SMOOTHED_FUNNEL_FUNCTIONS",
