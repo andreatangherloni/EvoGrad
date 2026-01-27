@@ -539,6 +539,10 @@ def run_evograd_single(
     seed: int,
     max_evals: int,
     pop_size: int,
+    lr_pop: float,
+    lr_hyper: float,
+    grad_clip_pop: float,
+    grad_clip_hyper: float,
     device: str,
 ) -> RunResult:
     """Run a single EvoGrad optimization."""
@@ -584,6 +588,11 @@ def run_evograd_single(
             termination=MaxEvaluations(max_evals),
             seed=seed,
             verbose=False,
+            save_history=True,
+            lr_pop=lr_pop,
+            lr_hyper=lr_hyper,
+            grad_clip_pop=grad_clip_pop,
+            grad_clip_hyper=grad_clip_hyper,
         )
         
         return RunResult(
@@ -762,7 +771,9 @@ def run_single_job(job: Dict[str, Any]) -> RunResult:
     else:
         return run_evograd_single(
             job["algorithm"], job["config"], job["function"], job["n_var"],
-            job["xl"], job["xu"], job["seed"], job["max_evals"], job["pop_size"], job["device"],
+            job["xl"], job["xu"], job["seed"], job["max_evals"], job["pop_size"],
+            job["lr_pop"], job["lr_hyper"], job["grad_clip_pop"],
+            job["grad_clip_hyper"], job["device"],
         )
 
 
@@ -773,6 +784,10 @@ def run_benchmark_parallel(
     xl: float,
     xu: float,
     max_evals: int,
+    lr_pop: float,
+    lr_hyper: float,
+    grad_clip_pop: float,
+    grad_clip_hyper: float,
     n_runs: int = 30,
     pop_size: int = 100,
     device: str = "cpu",
@@ -809,7 +824,9 @@ def run_benchmark_parallel(
                 job = {
                     "algorithm": algorithm_name, "config": config, "function": func_name,
                     "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
-                    "max_evals": max_evals, "pop_size": pop_size, "device": device,
+                    "max_evals": max_evals, "pop_size": pop_size, 
+                    "lr_pop": lr_pop, "lr_hyper": lr_hyper, "grad_clip_pop": grad_clip_pop,
+                    "grad_clip_hyper": grad_clip_hyper, "device": device,
                 }
                 if is_adam:
                     job["adam_lr"] = adam_lr
@@ -1028,6 +1045,11 @@ Examples:
     parser.add_argument("--list_functions", action="store_true",
                         help="List all available functions and exit")
     
+    parser.add_argument("--lr_pop", type=float, default=-1)
+    parser.add_argument("--lr_hyper", type=float, default=-1)
+    parser.add_argument("--grad_clip_pop", type=float, default=-1)
+    parser.add_argument("--grad_clip_hyper", type=float, default=-1)
+    
     args = parser.parse_args()
     
     # List functions mode
@@ -1103,6 +1125,10 @@ Examples:
         xu=args.xu,
         max_evals=args.max_evals,
         n_runs=args.n_runs,
+        lr_pop=args.lr_pop,
+        lr_hyper=args.lr_hyper,
+        grad_clip_pop=args.grad_clip_pop,
+        grad_clip_hyper=args.grad_clip_hyper,
         pop_size=args.pop_size,
         device=args.device,
         include_pymoo=not args.no_pymoo,

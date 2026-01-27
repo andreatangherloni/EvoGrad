@@ -29,7 +29,7 @@ Example:
     ...     termination=MaxEvaluations(10000),
     ...     seed=42,
     ...     verbose=True,
-    ... )
+    ...     )
     >>> 
     >>> print(f"Best fitness: {result.best_fitness}")
     >>> print(f"Best solution: {result.best_solution}")
@@ -66,6 +66,12 @@ __all__ = [
     "minimize",
 ]
 
+_OPT_DEFAULTS = {
+    "GA":    dict(lr_pop=3e-4,  lr_hyper=0.001,  grad_clip_pop=0.2, grad_clip_hyper=0.2, pop_momentum=0.0),
+    "DE":    dict(lr_pop=0.01,  lr_hyper=0.001,  grad_clip_pop=0.5, grad_clip_hyper=0.3, pop_momentum=0.9),
+    "PSO":   dict(lr_pop=0.001, lr_hyper=0.001,  grad_clip_pop=1.0, grad_clip_hyper=0.1, pop_momentum=0.9),    
+    "CMAES": dict(lr_pop=0.003, lr_hyper=0.0003, grad_clip_pop=0.5, grad_clip_hyper=0.1, pop_momentum=0.9),
+}
 
 def minimize(
     problem: Problem,
@@ -78,13 +84,16 @@ def minimize(
     save_history: bool = True,
     # Differentiable mode options
     optimizer: Optional[torch.optim.Optimizer] = None,
-    lr: float = 0.01,
-    grad_clip: Optional[float] = None,
-    scheduler: Optional[str] = "plateau",
+    lr_pop: Optional[float] = None,
+    lr_hyper: Optional[float] = None,
+    grad_clip_pop: Optional[float] = None,
+    grad_clip_hyper: Optional[float] = None,
+    scheduler: Optional[str] = None,
     scheduler_patience: int = 50,
     scheduler_factor: float = 0.5,
     min_lr: float = 1e-6,
-) -> Result:
+) -> Result:    
+    
     """
     Minimise an objective function using a population-based algorithm.
     
@@ -138,8 +147,10 @@ def minimize(
         # Differentiable mode options (used if learnable params exist):
         optimizer: PyTorch optimizer for gradient-based updates.
             If None, SGD is used with specified lr.
-        lr: Learning rate for gradient-based updates (default: 0.01).
-        grad_clip: Maximum gradient norm for clipping (None = no clipping).
+        lr_pop: Learning rate for gradient-based updates of the population (default: 1e-2).
+        lr_hyper: Learning rate for gradient-based updates of the hyperparameters (default: 1e-3).
+        grad_clip_pop: Maximum gradient norm for clipping population gradient (None = no clipping).
+        grad_clip_hyper: Maximum gradient norm for clipping hyperparam gradient (None = no clipping).
         scheduler: Learning rate scheduler type:
             - 'plateau': Reduce on plateau (default)
             - 'step': Reduce every N generations
@@ -173,12 +184,12 @@ def minimize(
         ...     crossover=SBX(eta=15, differentiable=True),
         ...     mutation=PolynomialMutation(eta=20, differentiable=True),
         ...     differentiable=False,  # Population not updated via gradients
-        ... )
+        ...     )
         >>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000))
         >>> 
         >>> # Full differentiable mode
         >>> algorithm = GA(pop_size=100, differentiable=True)
-        >>> result = minimize(problem, algorithm, lr=0.01, grad_clip=1.0)
+        >>> result = minimize(problem, algorithm, lr=0.01, grad_clip_pop=1.0)
     
     Note:
         The algorithm is initialized inside this function. Do not call
@@ -216,25 +227,57 @@ def minimize(
     # -------------------------------------------------------------------------
     
     # Collect all learnable parameters (nn.Parameter with requires_grad=True)
-    learnable_params = [p for p in algorithm.parameters() if p.requires_grad]
-    use_backprop = len(learnable_params) > 0
-    lr_scheduler = None
+    # learnable_params = [p for p in algorithm.parameters() if p.requires_grad]
+    
+    pop_params   = []
+    hyper_params = []
+    
+    for name, p in algorithm.named_parameters():
+        if not p.requires_grad:
+            continue
+        if name == "_population":
+            pop_params.append(p)
+        else:
+            hyper_params.append(p)
+    
+    use_backprop = (len(pop_params) > 0) or (len(hyper_params) > 0)
+    
+    lr_pop_eff, lr_hyper_eff, grad_clip_pop, grad_clip_hyper, defaults = _resolve_opt_defaults(
+    algorithm, problem, lr_pop, lr_hyper, grad_clip_pop, grad_clip_hyper)
+    
+    optimizers: List[torch.optim.Optimizer] = []
+    schedulers: List[Optional[torch.optim.lr_scheduler.LRScheduler]] = []
     
     if use_backprop:
         # Create optimizer if not provided
         if optimizer is None:
-            optimizer = torch.optim.SGD(learnable_params, lr=lr)
+            if len(pop_params) > 0 and isinstance(lr_pop_eff, (int, float)) and lr_pop_eff > 0:
+                optimizers.append(torch.optim.SGD(pop_params, lr=lr_pop_eff, momentum=defaults["pop_momentum"]))
+
+            if len(hyper_params) > 0 and isinstance(lr_hyper_eff, (int, float)) and lr_hyper_eff > 0:
+                optimizers.append(torch.optim.Adam(hyper_params, lr=lr_hyper_eff))
+                
+        else:
+            # Accept a single optimizer or a list/tuple of optimizers
+            if isinstance(optimizer, (list, tuple)):
+                optimizers.extend(list(optimizer))
+            else:
+                optimizers.append(optimizer)
         
         # Create LR scheduler
-        lr_scheduler = _create_scheduler(
-            optimizer,
-            scheduler,
-            scheduler_patience,
-            scheduler_factor,
-            min_lr,
-        )
+        for opt in optimizers:
+            schedulers.append(
+                _create_scheduler(
+                    opt,
+                    scheduler,
+                    scheduler_patience,
+                    scheduler_factor,
+                    min_lr,
+                )
+            )
     else:
-        optimizer = None
+        optimizers = []
+        schedulers = []
     
     # -------------------------------------------------------------------------
     # Create callback state
@@ -278,9 +321,12 @@ def minimize(
         if use_backprop:
             _step_differentiable(
                 algorithm,
-                optimizer,
-                lr_scheduler,
-                grad_clip,
+                optimizers,
+                schedulers,
+                pop_params,
+                hyper_params,
+                grad_clip_pop,
+                grad_clip_hyper,
             )
         else:
             algorithm.step()
@@ -324,6 +370,35 @@ def minimize(
 # =============================================================================
 # Helper Functions
 # =============================================================================
+
+def _resolve_opt_defaults(
+    algorithm: "Algorithm",
+    problem: "Problem",
+    lr_pop,
+    lr_hyper,
+    grad_clip_pop,
+    grad_clip_hyper,
+):
+    alg_name = algorithm.__class__.__name__
+    defaults = _OPT_DEFAULTS.get(alg_name, _OPT_DEFAULTS["GA"])
+
+    # -1 means "use defaults", None means "disable" (for clips)
+    if lr_pop == -1:
+        lr_pop = defaults["lr_pop"]
+    if lr_hyper == -1:
+        lr_hyper = defaults["lr_hyper"]
+    if grad_clip_pop == -1:
+        grad_clip_pop = defaults["grad_clip_pop"]
+    if grad_clip_hyper == -1:
+        grad_clip_hyper = defaults["grad_clip_hyper"]
+
+    # Dimension scaling only if lr_pop is > 0
+    if isinstance(lr_pop, (int, float)) and lr_pop > 0:
+        lr_pop_eff = lr_pop / (problem.n_var ** 0.5)
+    else:
+        lr_pop_eff = lr_pop  # 0.0 or something explicit
+
+    return lr_pop_eff, lr_hyper, grad_clip_pop, grad_clip_hyper, defaults
 
 def _parse_termination(termination: Optional[Termination]) -> Termination:
     """
@@ -462,9 +537,12 @@ def _create_scheduler(
 
 def _step_differentiable(
     algorithm: Algorithm,
-    optimizer: torch.optim.Optimizer,
-    scheduler: Optional[torch.optim.lr_scheduler.LRScheduler],
-    grad_clip: Optional[float],
+    optimizers: List[torch.optim.Optimizer],
+    schedulers: List[Optional[torch.optim.lr_scheduler.LRScheduler]],
+    pop_params: Optional[List],
+    hyper_params: Optional[List],
+    grad_clip_pop: Optional[float],
+    grad_clip_hyper: Optional[float],
 ) -> float:
     """
     Perform one generation step with gradient-based updates.
@@ -478,16 +556,20 @@ def _step_differentiable(
         algorithm: The algorithm instance.
         optimizer: PyTorch optimizer.
         scheduler: Optional LR scheduler.
-        grad_clip: Maximum gradient norm for clipping.
+        pop_params: population parameters.
+        hyper_params: hyperparam parameters.
+        grad_clip_pop: Maximum gradient norm for clipping the population gradient.
+        grad_clip_hyper: Maximum gradient norm for clipping the hyperparam gradient.
     
     Returns:
         Loss value (best fitness).
     """
-    if algorithm.differentiable:
+    if algorithm.differentiable and isinstance(algorithm.population, torch.nn.Parameter):
         algorithm.population.requires_grad_(True)
     
     # Zero gradients
-    optimizer.zero_grad(set_to_none=True)
+    for opt in optimizers:
+        opt.zero_grad(set_to_none=True)
     
     # Forward pass (builds computation graph)
     loss = algorithm.forward()
@@ -496,20 +578,26 @@ def _step_differentiable(
     loss.backward()
     
     # Gradient clipping
-    if grad_clip is not None:
-        torch.nn.utils.clip_grad_norm_(algorithm.parameters(), grad_clip)
-    
+    if grad_clip_pop is not None and pop_params:
+        torch.nn.utils.clip_grad_norm_(pop_params, grad_clip_pop)
+
+    if grad_clip_hyper is not None and hyper_params:
+        torch.nn.utils.clip_grad_norm_(hyper_params, grad_clip_hyper)
+            
     # Optimizer step
-    optimizer.step()
+    for opt in optimizers:
+        opt.step()
     
     # Commit evolutionary changes
     algorithm.update_state()
     
     # Scheduler step
-    if scheduler is not None:
-        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-            scheduler.step(loss.item())
+    for sch in schedulers:
+        if sch is None:
+            continue
+        if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            sch.step(loss.item())
         else:
-            scheduler.step()
+            sch.step()
     
     return float(loss.detach())

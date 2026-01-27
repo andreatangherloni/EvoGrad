@@ -297,8 +297,6 @@ class SHADE(Algorithm):
         differentiable: If True, population becomes an nn.Parameter and
             selection uses Gumbel-Softmax (learnable population).
         selection_temperature: Temperature for Gumbel-Softmax selection.
-        seed: Random seed for reproducibility.
-        device: Computation device.
         dtype: Tensor dtype.
     
     Attributes:
@@ -329,8 +327,6 @@ class SHADE(Algorithm):
         adaptive: bool = False,
         differentiable: bool = False,
         selection_temperature: float = 1.0,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.memory_size = memory_size
@@ -365,8 +361,6 @@ class SHADE(Algorithm):
             n_offsprings=pop_size,
             differentiable=differentiable,  # Controls whether population is learnable
             adaptive=adaptive,
-            seed=seed,
-            device=device,
             dtype=dtype,
         )
         
@@ -536,7 +530,7 @@ class SHADE(Algorithm):
         
         return F, CR
     
-    def _select_pbest(self: float) -> Tensor:
+    def _select_pbest(self) -> Tensor:
         """
         Select random pbest individuals from top p% of population.
         
@@ -583,6 +577,70 @@ class SHADE(Algorithm):
         
         return selected
     
+    def _top_p_indices(self) -> Tensor:
+        N = self.pop_size
+        p = max(2, int(torch.ceil(torch.tensor(self.p_best_rate * N)).item()))
+        return torch.argsort(self.fitness)[:p]
+
+    def _rand_indices_excluding(self, n: int, exclude: Tensor, high: int) -> Tensor:
+        # exclude: [n] indices in [0, high)
+        # sample with rejection (vectorized-ish, few retries)
+        idx = torch.randint(0, high, (n,), device=self.device)
+        for _ in range(5):
+            bad = idx.eq(exclude)
+            if not bad.any():
+                break
+            idx[bad] = torch.randint(0, high, (bad.sum().item(),), device=self.device)
+        # final fallback: shift bad by 1
+        bad = idx.eq(exclude)
+        if bad.any():
+            idx[bad] = (idx[bad] + 1) % high
+        return idx
+
+    def _rand_indices_excluding_two(self, n: int, exclude1: Tensor, exclude2: Tensor, high: int) -> Tensor:
+        idx = torch.randint(0, high, (n,), device=self.device)
+        for _ in range(7):
+            bad = idx.eq(exclude1) | idx.eq(exclude2)
+            if not bad.any():
+                break
+            idx[bad] = torch.randint(0, high, (bad.sum().item(),), device=self.device)
+        bad = idx.eq(exclude1) | idx.eq(exclude2)
+        if bad.any():
+            idx[bad] = (idx[bad] + 1) % high
+        return idx
+    
+    # def _mutate(self) -> Tensor:
+    #     """
+    #     Generate donor vectors using current-to-pbest/1 mutation.
+        
+    #     v_i = x_i + F_i * (x_pbest - x_i) + F_i * (x_r1 - x_r2)
+        
+    #     Returns:
+    #         Donor vectors [pop_size, n_var].
+    #     """
+    #     N = self.pop_size
+        
+    #     # Sample F and CR for this generation
+    #     self._current_F, self._current_CR = self._sample_parameters()
+        
+    #     # Select pbest (random from top p%)
+    #     x_pbest = self._select_pbest()
+        
+    #     # Select r1 from population (random, different from current)
+    #     x_r1 = self.selection(self.population, self.fitness, n_select=N)
+        
+    #     # Select r2 from population ∪ archive
+    #     x_r2 = self._select_random_from_union()
+        
+    #     # Ensure F has correct shape for broadcasting [N, 1]
+    #     F = self._current_F.unsqueeze(-1)
+        
+    #     # current-to-pbest/1 mutation
+    #     # v_i = x_i + F * (x_pbest - x_i) + F * (x_r1 - x_r2)
+    #     donor = self.population + F * (x_pbest - self.population) + F * (x_r1 - x_r2)
+        
+    #     return donor
+    
     def _mutate(self) -> Tensor:
         """
         Generate donor vectors using current-to-pbest/1 mutation.
@@ -596,21 +654,42 @@ class SHADE(Algorithm):
         
         # Sample F and CR for this generation
         self._current_F, self._current_CR = self._sample_parameters()
-        
-        # Select pbest (random from top p%)
-        x_pbest = self._select_pbest()
-        
-        # Select r1 from population (random, different from current)
-        x_r1 = self.selection(self.population, self.fitness, n_select=N)
-        
-        # Select r2 from population ∪ archive
-        x_r2 = self._select_random_from_union()
-        
-        # Ensure F has correct shape for broadcasting [N, 1]
+
+        N = self.pop_size
+        i_idx = torch.arange(N, device=self.device)
+
+        # --- pbest index: random from top p%, excluding i ---
+        top_idx = self._top_p_indices()                         # [p]
+        pbest_idx = top_idx[torch.randint(0, top_idx.numel(), (N,), device=self.device)]
+        # ensure pbest != i
+        same = pbest_idx.eq(i_idx)
+        if same.any():
+            # resample where needed
+            pbest_idx[same] = top_idx[torch.randint(0, top_idx.numel(), (same.sum().item(),), device=self.device)]
+            # final fallback
+            same = pbest_idx.eq(i_idx)
+            if same.any():
+                pbest_idx[same] = (pbest_idx[same] + 1) % N
+
+        # --- r1 index: from population excluding i ---
+        r1_idx = self._rand_indices_excluding(N, i_idx, high=N)
+
+        # --- r2 index: from union (pop + archive) excluding i and r1 ---
+        if self.memory.archive is not None and self.memory.archive_size > 0:
+            union = torch.cat([self.population, self.memory.archive], dim=0)
+            union_N = union.shape[0]
+            # map i and r1 into union space (they refer to pop indices)
+            r2_idx = self._rand_indices_excluding_two(N, i_idx, r1_idx, high=union_N)
+            x_r2 = union[r2_idx]
+        else:
+            # if no archive, select from population excluding i and r1
+            r2_idx = self._rand_indices_excluding_two(N, i_idx, r1_idx, high=N)
+            x_r2 = self.population[r2_idx]
+
+        x_pbest = self.population[pbest_idx]
+        x_r1 = self.population[r1_idx]
+
         F = self._current_F.unsqueeze(-1)
-        
-        # current-to-pbest/1 mutation
-        # v_i = x_i + F * (x_pbest - x_i) + F * (x_r1 - x_r2)
         donor = self.population + F * (x_pbest - self.population) + F * (x_r1 - x_r2)
         
         return donor

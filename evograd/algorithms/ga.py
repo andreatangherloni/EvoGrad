@@ -107,8 +107,6 @@ class GA(Algorithm):
         eliminate_duplicates: Duplicate handling strategy.        
         differentiable: Enable gradient flow through population.
         adaptive: Enable learnable operator parameters.
-        seed: Random seed for reproducibility.
-        device: Computation device ('cpu', 'cuda', 'mps', or None).
         dtype: Tensor dtype (default: torch.float32).
     
     Attributes:
@@ -154,8 +152,6 @@ class GA(Algorithm):
         eliminate_duplicates: bool = True,
         differentiable: bool = True,
         adaptive: bool = True,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         # Create default operators if not provided
@@ -213,8 +209,6 @@ class GA(Algorithm):
             n_offsprings=n_offsprings,
             differentiable=differentiable,
             adaptive=adaptive,
-            seed=seed,
-            device=device,
             dtype=dtype,
         )
             

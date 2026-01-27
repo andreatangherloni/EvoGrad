@@ -53,7 +53,7 @@ from typing import (
 import torch
 import torch.nn as nn
 
-from evograd.utils.device import get_device, set_seed
+from evograd.utils.device import set_seed
 from evograd.utils.duplicates import DuplicateEliminator, DuplicateMethod
 from evograd.operators.sampling import UniformSampling
 
@@ -180,15 +180,12 @@ class Algorithm(nn.Module, ABC):
             - DuplicateEliminator instance: Custom eliminator
         n_offsprings: Number of offspring per generation (default: pop_size).
         differentiable: Enable gradient flow through operations.
-        seed: Random seed for reproducibility.
-        device: Computation device ('cpu', 'cuda', 'mps', or None for auto).
         dtype: Tensor dtype (default: torch.float32).
     
     Attributes:
         pop_size: Population size.
         n_offsprings: Number of offspring per generation.
         differentiable: Whether gradients are enabled.
-        device: Computation device.
         dtype: Tensor data type.
         problem: The Problem instance (set after initialize()).
         state: AlgorithmState containing current optimisation state.
@@ -222,8 +219,7 @@ class Algorithm(nn.Module, ABC):
         n_offsprings: Optional[int] = None,
         differentiable: bool = True,
         adaptive: bool = True,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
+        # seed: Optional[int] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
@@ -233,12 +229,11 @@ class Algorithm(nn.Module, ABC):
             raise ValueError(f"pop_size must be >= 1, got {pop_size}")
         
         # Set seed first for reproducibility
-        if seed is not None:
-            set_seed(seed)
-        self._seed = seed
+        # if seed is not None:
+        #     set_seed(seed)
+        # self._seed = seed
         
         # Device and dtype
-        self.device = get_device(device)
         self.dtype = dtype
         
         # Population parameters
@@ -373,6 +368,7 @@ class Algorithm(nn.Module, ABC):
         
         # Store problem reference
         self.problem = problem
+        self.device = problem.device
         
         # Move problem bounds to device
         self.register_buffer(
@@ -652,7 +648,7 @@ class Algorithm(nn.Module, ABC):
                 "n_offsprings": self.n_offsprings,
                 "differentiable": self.differentiable,
                 "adaptive": self.adaptive,
-                "seed": self._seed,
+                # "seed": self._seed,
             },
             "is_initialized": self._is_initialized,
         }

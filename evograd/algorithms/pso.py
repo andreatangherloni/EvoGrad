@@ -91,8 +91,6 @@ class PSO(Algorithm):
             via backpropagation.
         per_particle_coeffs: If True and adaptive=True, each particle
             has its own inertia, c1, c2 values. Default: False.
-        seed: Random seed for reproducibility.
-        device: Computation device.
         dtype: Tensor dtype.
     
     Attributes:
@@ -132,8 +130,6 @@ class PSO(Algorithm):
         adaptive: bool = False,
         differentiable: bool = False,
         per_particle_coeffs: bool = False,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.adaptive = adaptive
@@ -156,8 +152,6 @@ class PSO(Algorithm):
             n_offsprings=pop_size,
             differentiable=differentiable,
             adaptive=adaptive,
-            seed=seed,
-            device=device,
             dtype=dtype,
         )
     

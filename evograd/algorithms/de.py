@@ -185,8 +185,6 @@ class DE(Algorithm):
         differentiable: If True, population is differentiable and
             learned via backpropagation.
         selection_temperature: Initial temperature for Gumbel-Softmax selection.
-        seed: Random seed for reproducibility.
-        device: Computation device.
         dtype: Tensor dtype.
     
     Attributes:
@@ -226,8 +224,6 @@ class DE(Algorithm):
         adaptive: bool = False,
         differentiable: bool = False,
         selection_temperature: float = 1.0,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         # Parse variant
@@ -261,8 +257,6 @@ class DE(Algorithm):
             n_offsprings=pop_size,  # DE creates one trial per individual
             differentiable=differentiable,
             adaptive=adaptive,
-            seed=seed,
-            device=device,
             dtype=dtype,
         )
     

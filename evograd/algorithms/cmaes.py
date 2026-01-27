@@ -173,8 +173,6 @@ class CMAES(Algorithm):
         repair: Repair operator for constraint handling.
         adaptive: If True, adaptation coefficients are learnable.
         differentiable: If True, mean μ is learnable.
-        seed: Random seed for reproducibility.
-        device: Computation device.
         dtype: Tensor dtype.
     
     Attributes:
@@ -228,8 +226,6 @@ class CMAES(Algorithm):
         repair: Optional[nn.Module] = None,
         adaptive: bool = False,
         differentiable: bool = False,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.adaptive = adaptive
@@ -268,8 +264,6 @@ class CMAES(Algorithm):
             n_offsprings=effective_pop_size,
             differentiable=differentiable,
             adaptive=adaptive,
-            seed=seed,
-            device=device,
             dtype=dtype,
         )
         
@@ -982,11 +976,18 @@ class CMAES(Algorithm):
         self._setup_covariance(n_var, restart=True)
         self._setup_evolution_paths(n_var, restart=True)
         
-        # Re-initialize population buffer
-        self._population = torch.zeros(
-            self.pop_size, n_var, device=self.device, dtype=self.dtype
+        # Re-initialize population buffer + state tensors
+        new_pop = torch.zeros(self.pop_size, n_var, device=self.device, dtype=self.dtype)
+        if hasattr(self, "_population") and self._population.shape == new_pop.shape:
+            self._population.copy_(new_pop)
+        else:
+            self._population = new_pop
+
+        self.state.population = self._population
+        self.state.fitness = torch.full(
+            (self.pop_size,), float("inf"), device=self.device, dtype=self.dtype
         )
-        
+
         # Clear fitness history
         self._fitness_history = []
         self._generation_count = 0
@@ -1052,11 +1053,18 @@ class CMAES(Algorithm):
         self._setup_covariance(n_var, restart=True)
         self._setup_evolution_paths(n_var, restart=True)
         
-        # Re-initialize population buffer
-        self._population = torch.zeros(
-            self.pop_size, n_var, device=self.device, dtype=self.dtype
+        # Re-initialize population buffer + state tensors
+        new_pop = torch.zeros(self.pop_size, n_var, device=self.device, dtype=self.dtype)
+        if hasattr(self, "_population") and self._population.shape == new_pop.shape:
+            self._population.copy_(new_pop)
+        else:
+            self._population = new_pop
+
+        self.state.population = self._population
+        self.state.fitness = torch.full(
+            (self.pop_size,), float("inf"), device=self.device, dtype=self.dtype
         )
-        
+
         # Clear fitness history
         self._fitness_history = []
         self._generation_count = 0
