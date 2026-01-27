@@ -324,13 +324,13 @@ def create_evograd_algorithm(algorithm_name: str, config: str, pop_size: int, de
     name = algorithm_name.upper()
     
     if name == "DE":
-        return DE(pop_size=pop_size, F=0.5, CR=0.9, adaptive=adaptive, differentiable=differentiable, device=device, seed=seed)
+        return DE(pop_size=pop_size, F=0.5, CR=0.9, adaptive=adaptive, differentiable=differentiable)
     
     elif name == "SHADE":
-        return SHADE(pop_size=pop_size, adaptive=adaptive, differentiable=differentiable, device=device, seed=seed)
+        return SHADE(pop_size=pop_size, adaptive=adaptive, differentiable=differentiable)
     
     elif name == "PSO":
-        return PSO(pop_size=pop_size, w=0.7, c1=1.5, c2=1.5, adaptive=adaptive, differentiable=differentiable, device=device, seed=seed)
+        return PSO(pop_size=pop_size, w=0.7, c1=1.5, c2=1.5, adaptive=adaptive, differentiable=differentiable)
     
     elif name == "GA":
         return GA(
@@ -338,13 +338,11 @@ def create_evograd_algorithm(algorithm_name: str, config: str, pop_size: int, de
             selection=TournamentSelection(tournament_size=3, adaptive=adaptive),
             crossover=SBXCrossover(eta=15, prob=0.9, adaptive=adaptive),
             mutation=PolynomialMutation(eta=20, adaptive=adaptive),
-            differentiable=differentiable,
-            device=device,
-            seed=seed,
+            differentiable=differentiable
         )
     
     elif name == "CMAES":
-        return CMAES(pop_size=pop_size, sigma=0.5, adaptive=adaptive, differentiable=differentiable, device=device, seed=seed, bipop=True, restarts=9)
+        return CMAES(pop_size=pop_size, sigma=0.5, adaptive=adaptive, differentiable=differentiable)
     
     else:
         raise ValueError(f"Unknown algorithm: {algorithm_name}")
