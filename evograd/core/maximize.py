@@ -157,11 +157,14 @@ def maximize(
     callback: Optional[Union[Callback, List[Callback]]] = None,
     copy_algorithm: bool = False,
     save_history: bool = True,
+    initialize: bool = True,
     # Differentiable mode options
     optimizer: Optional[torch.optim.Optimizer] = None,
-    lr: float = 0.01,
-    grad_clip: Optional[float] = None,
-    scheduler: Optional[str] = "plateau",
+    lr_pop: Optional[float] = None,
+    lr_hyper: Optional[float] = None,
+    grad_clip_pop: Optional[float] = None,
+    grad_clip_hyper: Optional[float] = None,
+    scheduler: Optional[str] = None,
     scheduler_patience: int = 50,
     scheduler_factor: float = 0.5,
     min_lr: float = 1e-6,
@@ -186,11 +189,20 @@ def maximize(
         callback: Single Callback or list of Callbacks for monitoring.
         copy_algorithm: If True, create a copy of the algorithm.
         save_history: If True (default), save convergence history.
-        
+        initialize: If True (default), initialize the algorithm with the
+            problem. Set to False to continue optimization with an already
+            initialized algorithm (e.g., when switching problems at runtime
+            while preserving population state and hyperparameters).
+            The algorithm must have been previously initialized. When False,
+            the termination budget is additive (e.g., MaxEvaluations(500)
+            will run 500 more evaluations from the current state).
+
         # Differentiable mode options:
         optimizer: PyTorch optimizer for gradient-based updates.
-        lr: Learning rate for gradient-based updates.
-        grad_clip: Maximum gradient norm for clipping.
+        lr_pop: Learning rate for population updates.
+        lr_hyper: Learning rate for hyperparameter updates.
+        grad_clip_pop: Maximum gradient norm for population clipping.
+        grad_clip_hyper: Maximum gradient norm for hyperparameter clipping.
         scheduler: Learning rate scheduler type.
         scheduler_patience: Generations before reducing LR.
         scheduler_factor: Factor to multiply LR when reducing.
@@ -227,7 +239,7 @@ def maximize(
     """
     # Wrap problem to negate objective
     negated_problem = _NegatedProblem(problem)
-    
+
     # Run minimisation on negated problem
     result = minimize(
         problem=negated_problem,
@@ -238,9 +250,12 @@ def maximize(
         callback=callback,
         copy_algorithm=copy_algorithm,
         save_history=save_history,
+        initialize=initialize,
         optimizer=optimizer,
-        lr=lr,
-        grad_clip=grad_clip,
+        lr_pop=lr_pop,
+        lr_hyper=lr_hyper,
+        grad_clip_pop=grad_clip_pop,
+        grad_clip_hyper=grad_clip_hyper,
         scheduler=scheduler,
         scheduler_patience=scheduler_patience,
         scheduler_factor=scheduler_factor,

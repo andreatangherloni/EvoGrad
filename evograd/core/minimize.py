@@ -82,6 +82,7 @@ def minimize(
     callback: Optional[Union[Callback, List[Callback]]] = None,
     copy_algorithm: bool = False,
     save_history: bool = True,
+    initialize: bool = True,
     # Differentiable mode options
     optimizer: Optional[torch.optim.Optimizer] = None,
     lr_pop: Optional[float] = None,
@@ -143,7 +144,14 @@ def minimize(
             preserve the original. Default False.
         save_history: If True (default), save convergence history
             in result. Set False to reduce memory for long runs.
-        
+        initialize: If True (default), initialize the algorithm with the
+            problem. Set to False to continue optimization with an already
+            initialized algorithm (e.g., when switching problems at runtime
+            while preserving population state and hyperparameters).
+            The algorithm must have been previously initialized. When False,
+            the termination budget is additive (e.g., MaxEvaluations(500)
+            will run 500 more evaluations from the current state).
+
         # Differentiable mode options (used if learnable params exist):
         optimizer: PyTorch optimizer for gradient-based updates.
             If None, SGD is used with specified lr.
@@ -190,10 +198,22 @@ def minimize(
         >>> # Full differentiable mode
         >>> algorithm = GA(pop_size=100, differentiable=True)
         >>> result = minimize(problem, algorithm, lr=0.01, grad_clip_pop=1.0)
-    
+        >>>
+        >>> # Continue optimization with a different problem (e.g., surrogate -> true)
+        >>> # First optimize with surrogate problem
+        >>> pso = PSO(pop_size=100, differentiable=True)
+        >>> result1 = minimize(surrogate_problem, pso, termination=MaxEvaluations(10000))
+        >>> # Then continue with true problem (preserves velocities, personal bests)
+        >>> result2 = minimize(true_problem, pso, termination=MaxEvaluations(500),
+        ...                    initialize=False)
+
     Note:
-        The algorithm is initialized inside this function. Do not call
-        algorithm.initialize() before passing to minimize().
+        By default (initialize=True), the algorithm is initialized inside this
+        function. Do not call algorithm.initialize() before passing to minimize().
+
+        When initialize=False, the algorithm must have been previously initialized
+        (e.g., from a prior minimize() call). This allows switching problems at
+        runtime while preserving population state, velocities, and personal bests.
     """
     # -------------------------------------------------------------------------
     # Setup
@@ -213,10 +233,26 @@ def minimize(
     
     # Setup callbacks
     callbacks = _setup_callbacks(callback, verbose, save_history)
-    
-    # Initialize algorithm with problem
-    algorithm.initialize(problem)
-    
+
+    # Initialize algorithm with problem (or continue with existing state)
+    if initialize:
+        algorithm.initialize(problem)
+    else:
+        # Continue with existing algorithm state but update problem reference
+        # This preserves population, velocities, personal bests, etc.
+        if not hasattr(algorithm, 'generation') or algorithm.generation == 0:
+            raise ValueError(
+                "initialize=False requires a previously initialized algorithm. "
+                "Run minimize() with initialize=True first."
+            )
+        # Update problem reference and bounds
+        algorithm.problem = problem
+        algorithm.xl = problem.xl
+        algorithm.xu = problem.xu
+
+        # Update termination budget to add to existing evaluations/generations
+        _update_termination_budget(termination, algorithm)
+
     # Setup result builder
     builder = ResultBuilder()
     builder.set_problem(problem)
@@ -403,24 +439,60 @@ def _resolve_opt_defaults(
 def _parse_termination(termination: Optional[Termination]) -> Termination:
     """
     Parse termination argument into Termination instance.
-    
+
     Args:
         termination: Termination instance or None for default.
-    
+
     Returns:
         Termination instance.
     """
     if termination is None:
         return default_termination()
-    
+
     if isinstance(termination, Termination):
         return termination
-    
+
     raise TypeError(
         f"termination must be a Termination instance or None. "
         f"Got {type(termination).__name__}. "
         f"Example: termination=MaxEvaluations(10000)"
     )
+
+
+def _update_termination_budget(
+    termination: Termination,
+    algorithm: "Algorithm",
+) -> None:
+    """
+    Update termination budget when continuing optimization (initialize=False).
+
+    Adds the current algorithm's evaluations/generations to the termination
+    criterion's budget, so the new budget is additive rather than absolute.
+
+    Args:
+        termination: The termination criterion to update.
+        algorithm: The algorithm with current evaluation/generation counts.
+    """
+    from evograd.core.termination import (
+        MaxEvaluations,
+        MaxGenerations,
+        TerminationCollection,
+    )
+
+    def _update_single(term: Termination) -> None:
+        if isinstance(term, MaxEvaluations):
+            # Add current evaluations to budget
+            term.max_evals += algorithm.n_evals
+        elif isinstance(term, MaxGenerations):
+            # Add current generations to budget
+            term.max_gens += algorithm.generation
+
+    if isinstance(termination, TerminationCollection):
+        # Update all criteria in the collection
+        for criterion in termination.criteria:
+            _update_single(criterion)
+    else:
+        _update_single(termination)
 
 
 def _setup_callbacks(
