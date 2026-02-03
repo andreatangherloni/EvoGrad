@@ -134,6 +134,7 @@ try:
     from pymoo.core.problem import Problem as PymooProblem
     from pymoo.optimize import minimize as pymoo_minimize
     from pymoo.termination import get_termination
+    from pymoo.operators.sampling.rnd import FloatRandomSampling
     PYMOO_AVAILABLE = True
 except ImportError:
     PYMOO_AVAILABLE = False
@@ -156,6 +157,8 @@ try:
     from evograd.operators.selection import TournamentSelection
     from evograd.operators.crossover import SBXCrossover
     from evograd.operators.mutation import PolynomialMutation
+    from evograd.operators.survival import FitnessSurvival
+    from evograd.operators.repair import ReflectRepair
     
     EVOGRAD_AVAILABLE = True
 except ImportError as e:
@@ -324,25 +327,46 @@ def create_evograd_algorithm(algorithm_name: str, config: str, pop_size: int, de
     name = algorithm_name.upper()
     
     if name == "DE":
-        return DE(pop_size=pop_size, F=0.5, CR=0.9, adaptive=adaptive, differentiable=differentiable)
+        return DE(pop_size=pop_size,
+                  F=0.5,
+                  CR=0.2,
+                  variant='DE/best/1/bin',
+                  repair=ReflectRepair(),
+                  adaptive=adaptive,
+                  differentiable=differentiable)
     
     elif name == "SHADE":
-        return SHADE(pop_size=pop_size, adaptive=adaptive, differentiable=differentiable)
+        return SHADE(pop_size=pop_size,
+                     repair=ReflectRepair(),
+                     adaptive=adaptive,
+                     differentiable=differentiable)
     
     elif name == "PSO":
-        return PSO(pop_size=pop_size, w=0.7, c1=1.5, c2=1.5, adaptive=adaptive, differentiable=differentiable)
+        return PSO(pop_size=pop_size,
+                   w=0.7,
+                   c1=1.5,
+                   c2=1.5,
+                   repair=ReflectRepair(),
+                   adaptive=adaptive,
+                   differentiable=differentiable)
     
     elif name == "GA":
         return GA(
             pop_size=pop_size,
-            selection=TournamentSelection(tournament_size=3, adaptive=adaptive),
-            crossover=SBXCrossover(eta=15, prob=0.9, adaptive=adaptive),
-            mutation=PolynomialMutation(eta=20, adaptive=adaptive),
+            selection=TournamentSelection(tournament_size=2, adaptive=adaptive),
+            crossover=SBXCrossover(eta=15, prob=0.5, adaptive=adaptive),
+            mutation=PolynomialMutation(eta=20, prob=0.9, adaptive=adaptive),
+            survival=FitnessSurvival(adaptive=adaptive),
+            repair=ReflectRepair(),
             differentiable=differentiable
         )
     
     elif name == "CMAES":
-        return CMAES(pop_size=pop_size, sigma=0.5, adaptive=adaptive, differentiable=differentiable)
+        return CMAES(pop_size=pop_size,
+                     sigma=0.1,
+                     repair=ReflectRepair(),
+                     adaptive=adaptive,
+                     differentiable=differentiable)
     
     else:
         raise ValueError(f"Unknown algorithm: {algorithm_name}")
@@ -354,20 +378,29 @@ def create_pymoo_algorithm(algorithm_name: str, pop_size: int):
     
     if name == "DE":
         from pymoo.algorithms.soo.nonconvex.de import DE as PymooDE
-        return PymooDE(pop_size=pop_size)
+        return PymooDE(pop_size=pop_size,
+                       sampling=FloatRandomSampling(),
+                       )
     elif name == "SHADE":
         # Pymoo doesn't have SHADE, use DE as baseline
         from pymoo.algorithms.soo.nonconvex.de import DE as PymooDE
-        return PymooDE(pop_size=pop_size)
+        return PymooDE(pop_size=pop_size,
+                       sampling=FloatRandomSampling(),)
     elif name == "PSO":
         from pymoo.algorithms.soo.nonconvex.pso import PSO as PymooPSO
-        return PymooPSO(pop_size=pop_size)
+        return PymooPSO(pop_size=pop_size,
+                        sampling=FloatRandomSampling(),
+                        w=0.7,
+                        c1=1.5,
+                        c2=1.5,
+                        adaptive=False,)
     elif name == "GA":
         from pymoo.algorithms.soo.nonconvex.ga import GA as PymooGA
-        return PymooGA(pop_size=pop_size)
+        return PymooGA(pop_size=pop_size,
+                       sampling=FloatRandomSampling(),)
     elif name == "CMAES":
         from pymoo.algorithms.soo.nonconvex.cmaes import CMAES as PymooCMAES
-        return PymooCMAES()
+        return PymooCMAES(sigma=0.1)
     else:
         raise ValueError(f"Unknown pymoo algorithm: {algorithm_name}")
 
