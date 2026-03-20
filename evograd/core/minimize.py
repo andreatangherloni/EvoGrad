@@ -301,6 +301,7 @@ def minimize(
                 optimizers.append(optimizer)
         
         # Create LR scheduler
+        est_gens = _estimate_total_generations(termination, algorithm)
         for opt in optimizers:
             schedulers.append(
                 _create_scheduler(
@@ -309,6 +310,7 @@ def minimize(
                     scheduler_patience,
                     scheduler_factor,
                     min_lr,
+                    total_generations=est_gens,
                 )
             )
     else:
@@ -415,6 +417,15 @@ def _resolve_opt_defaults(
     grad_clip_pop,
     grad_clip_hyper,
 ):
+    """Resolve per-algorithm optimiser defaults.
+
+    Sentinel convention:
+        - ``-1`` means "use the per-algorithm default from ``_OPT_DEFAULTS``".
+          This is the value the benchmark CLI passes by default.
+        - ``None`` means "disable" — no optimiser / no clipping.
+          This is the value ``minimize()`` uses when the caller omits the arg.
+        - Any other numeric value is used as-is.
+    """
     alg_name = algorithm.__class__.__name__
     defaults = _OPT_DEFAULTS.get(alg_name, _OPT_DEFAULTS["GA"])
 
@@ -428,7 +439,7 @@ def _resolve_opt_defaults(
     if grad_clip_hyper == -1:
         grad_clip_hyper = defaults["grad_clip_hyper"]
 
-    # Dimension scaling only if lr_pop is > 0
+    # Dimension scaling only if lr_pop > 0
     if isinstance(lr_pop, (int, float)) and lr_pop > 0:
         lr_pop_eff = lr_pop / (problem.n_var ** 0.5)
     else:
@@ -562,19 +573,57 @@ def _check_target_reached(termination: Termination, algorithm: Algorithm) -> boo
     return False
 
 
+def _estimate_total_generations(termination: Termination, algorithm: "Algorithm") -> int:
+    """
+    Estimate the total number of generations from the termination criterion.
+
+    Used to set ``T_max`` for the cosine-annealing scheduler so that the
+    learning-rate schedule matches the actual optimisation budget.
+
+    Falls back to 10 000 if no budget can be inferred.
+    """
+    from evograd.core.termination import MaxEvaluations, MaxGenerations, TerminationCollection
+
+    def _extract(term: Termination) -> Optional[int]:
+        if isinstance(term, MaxGenerations):
+            return term.max_gens
+        if isinstance(term, MaxEvaluations):
+            pop = max(algorithm.pop_size, 1)
+            return term.max_evals // pop
+        return None
+
+    if isinstance(termination, TerminationCollection):
+        for criterion in termination.criteria:
+            val = _extract(criterion)
+            if val is not None:
+                return val
+
+    val = _extract(termination)
+    if val is not None:
+        return val
+
+    return 10_000  # safe fallback
+
+
 def _create_scheduler(
     optimizer: torch.optim.Optimizer,
     scheduler_type: Optional[str],
     patience: int,
     factor: float,
     min_lr: float,
+    total_generations: int = 10_000,
 ) -> Optional[torch.optim.lr_scheduler.LRScheduler]:
-    """Create learning rate scheduler."""
+    """Create learning rate scheduler.
+
+    Args:
+        total_generations: Estimated total generations for the optimisation
+            run. Used as ``T_max`` for the cosine-annealing scheduler.
+    """
     if scheduler_type is None:
         return None
-    
+
     scheduler_type = scheduler_type.lower()
-    
+
     if scheduler_type == "plateau":
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -592,7 +641,7 @@ def _create_scheduler(
     elif scheduler_type == "cosine":
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=10000,
+            T_max=total_generations,
             eta_min=min_lr,
         )
     elif scheduler_type == "exponential":

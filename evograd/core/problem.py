@@ -94,8 +94,12 @@ class Problem(nn.Module):
         n_obj: Number of objectives (default: 1, multi-objective planned).
         name: Optional problem name for identification.
         device: Computation device (default: auto-detect).
-        dtype: Tensor dtype (default: float32).
-    
+        dtype: Tensor dtype (default: float32). Use ``torch.float64`` for
+            problems that require higher numerical precision, such as parameter
+            estimation with stiff ODE solvers. All operators respect the dtype
+            propagated from the Problem; ensure the Algorithm is created with a
+            matching dtype to avoid silent precision loss.
+
     Attributes:
         n_var: Number of decision variables.
         n_obj: Number of objectives.

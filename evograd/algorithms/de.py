@@ -439,83 +439,165 @@ class DE(Algorithm):
     ) -> Tensor:
         """
         Select parents for mutation using the selection operator.
-        
+
+        In adaptive (differentiable) mode, uses the soft Gumbel-Softmax
+        selection operator so that gradients flow through parent selection.
+
         Args:
             n_select: Number of parents to select.
-        
+
         Returns:
             Selected individuals [n_select, n_var].
         """
         return self.selection(self.population, self.fitness, n_select=n_select)
-    
+
+    @staticmethod
+    def _sample_distinct_indices(
+        N: int,
+        n_needed: int,
+        device: torch.device,
+        exclude: Optional[Tensor] = None,
+    ) -> List[Tensor]:
+        """
+        Sample ``n_needed`` mutually exclusive random index vectors of
+        length ``N``, each different from the optional ``exclude`` indices.
+
+        This is the canonical DE requirement: for each target *i* the
+        selected donor indices r1, r2, … must be distinct from each other
+        and from *i*.
+
+        Args:
+            N: Population size.
+            n_needed: How many distinct index vectors to draw (e.g. 3
+                for DE/rand/1).
+            device: Target device.
+            exclude: Optional ``[N]`` tensor of indices to avoid
+                (typically ``torch.arange(N)`` for the target vector).
+
+        Returns:
+            List of ``n_needed`` tensors, each of shape ``[N]``.
+        """
+        # Build a pool of candidate indices for each target
+        # For each row i we need n_needed indices from {0..N-1} \ {exclude[i]}
+        all_indices: List[Tensor] = []
+        for _ in range(n_needed):
+            idx = torch.randint(0, N, (N,), device=device)
+            all_indices.append(idx)
+
+        # Rejection-resample collisions (vectorised, one pass per pair)
+        targets = exclude if exclude is not None else torch.full((N,), -1, device=device)
+
+        for k in range(len(all_indices)):
+            # Avoid target index
+            collides = all_indices[k] == targets
+            while collides.any():
+                all_indices[k][collides] = torch.randint(0, N, (int(collides.sum()),), device=device)
+                collides = all_indices[k] == targets
+
+            # Avoid previously selected indices
+            for j in range(k):
+                collides = all_indices[k] == all_indices[j]
+                while collides.any():
+                    all_indices[k][collides] = torch.randint(0, N, (int(collides.sum()),), device=device)
+                    # Re-check all constraints for the resampled positions
+                    collides = all_indices[k] == targets
+                    for jj in range(k):
+                        collides = collides | (all_indices[k] == all_indices[jj])
+
+        return all_indices
+
     def _mutate(self) -> Tensor:
         """
         Generate donor vectors using the mutation strategy.
-        
+
+        In classical mode, parent indices are sampled to be mutually
+        exclusive and different from the target index (canonical DE).
+        In adaptive mode, the soft selection operator is used instead
+        so that gradients can flow through the selection process; the
+        exclusion constraint is relaxed in that case.
+
         Returns:
             Donor vectors [pop_size, n_var].
         """
         N = self.pop_size
         F = self._get_F_values(N)
-        
+
         # Ensure F has correct shape for broadcasting
         if F.dim() == 1:
             F = F.unsqueeze(-1)  # [N, 1] for broadcasting
-        
+
         mutation_type = self.variant.mutation
-        
+
+        # -----------------------------------------------------------------
+        # Helper: pick parents (hard distinct indices or soft selection)
+        # -----------------------------------------------------------------
+        def _hard_parents(n_needed: int, exclude: Optional[Tensor] = None) -> List[Tensor]:
+            """Return list of n_needed parent tensors [N, n_var] via hard distinct sampling."""
+            idx_list = self._sample_distinct_indices(N, n_needed, self.device, exclude=exclude)
+            return [self.population[idx] for idx in idx_list]
+
+        def _soft_parents(n_needed: int) -> List[Tensor]:
+            """Return list of n_needed parent tensors [N, n_var] via soft selection."""
+            return [self._select_parents(N) for _ in range(n_needed)]
+
+        use_soft = self.adaptive
+        target_idx = torch.arange(N, device=self.device)
+
         if mutation_type == "rand":
             # DE/rand: v = x_r1 + F * (x_r2 - x_r3)
-            r1 = self._select_parents(N)
-            r2 = self._select_parents(N)
-            r3 = self._select_parents(N)
-            
+            n_parents = 3 if self.variant.n_diff == 1 else 5
+            if use_soft:
+                parents = _soft_parents(n_parents)
+            else:
+                parents = _hard_parents(n_parents, exclude=target_idx)
+
             if self.variant.n_diff == 1:
-                donor = r1 + F * (r2 - r3)
-            else:  # n_diff == 2
-                r4 = self._select_parents(N)
-                r5 = self._select_parents(N)
-                donor = r1 + F * (r2 - r3) + F * (r4 - r5)
-        
+                donor = parents[0] + F * (parents[1] - parents[2])
+            else:
+                donor = parents[0] + F * (parents[1] - parents[2]) + F * (parents[3] - parents[4])
+
         elif mutation_type == "best":
             # DE/best: v = x_best + F * (x_r1 - x_r2)
             best_idx = torch.argmin(self.fitness)
             x_best = self.population[best_idx].unsqueeze(0).expand(N, -1)
-            
-            r1 = self._select_parents(N)
-            r2 = self._select_parents(N)
-            
+
+            n_parents = 2 if self.variant.n_diff == 1 else 4
+            if use_soft:
+                parents = _soft_parents(n_parents)
+            else:
+                parents = _hard_parents(n_parents, exclude=target_idx)
+
             if self.variant.n_diff == 1:
-                donor = x_best + F * (r1 - r2)
-            else:  # n_diff == 2
-                r3 = self._select_parents(N)
-                r4 = self._select_parents(N)
-                donor = x_best + F * (r1 - r2) + F * (r3 - r4)
-        
+                donor = x_best + F * (parents[0] - parents[1])
+            else:
+                donor = x_best + F * (parents[0] - parents[1]) + F * (parents[2] - parents[3])
+
         elif mutation_type == "current_to_best":
             # DE/current-to-best: v = x_i + F * (x_best - x_i) + F * (x_r1 - x_r2)
             best_idx = torch.argmin(self.fitness)
             x_best = self.population[best_idx].unsqueeze(0).expand(N, -1)
-            
-            r1 = self._select_parents(N)
-            r2 = self._select_parents(N)
-            
-            donor = self.population + F * (x_best - self.population) + F * (r1 - r2)
-        
+
+            if use_soft:
+                parents = _soft_parents(2)
+            else:
+                parents = _hard_parents(2, exclude=target_idx)
+
+            donor = self.population + F * (x_best - self.population) + F * (parents[0] - parents[1])
+
         elif mutation_type == "current_to_rand":
             # DE/current-to-rand: v = x_i + K * (x_r1 - x_i) + F * (x_r2 - x_r3)
-            # K is typically random in [0, 1]
             K = torch.rand(N, 1, device=self.device, dtype=self.dtype)
-            
-            r1 = self._select_parents(N)
-            r2 = self._select_parents(N)
-            r3 = self._select_parents(N)
-            
-            donor = self.population + K * (r1 - self.population) + F * (r2 - r3)
-        
+
+            if use_soft:
+                parents = _soft_parents(3)
+            else:
+                parents = _hard_parents(3, exclude=target_idx)
+
+            donor = self.population + K * (parents[0] - self.population) + F * (parents[1] - parents[2])
+
         else:
             raise ValueError(f"Unknown mutation type: {mutation_type}")
-        
+
         return donor
     
     def _infill(self) -> Tensor:

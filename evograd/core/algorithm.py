@@ -180,8 +180,12 @@ class Algorithm(nn.Module, ABC):
             - DuplicateEliminator instance: Custom eliminator
         n_offsprings: Number of offspring per generation (default: pop_size).
         differentiable: Enable gradient flow through operations.
-        dtype: Tensor dtype (default: torch.float32).
-    
+        dtype: Tensor dtype (default: torch.float32). Use ``torch.float64``
+            when the objective requires higher numerical precision (e.g.,
+            parameter estimation with stiff ODE solvers). The dtype should
+            match the Problem's dtype to avoid silent precision loss in
+            operator computations and log/exp hyperparameter transforms.
+
     Attributes:
         pop_size: Population size.
         n_offsprings: Number of offspring per generation.
@@ -219,20 +223,14 @@ class Algorithm(nn.Module, ABC):
         n_offsprings: Optional[int] = None,
         differentiable: bool = True,
         adaptive: bool = True,
-        # seed: Optional[int] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         super().__init__()
-        
+
         # Validate inputs
         if pop_size < 1:
             raise ValueError(f"pop_size must be >= 1, got {pop_size}")
-        
-        # Set seed first for reproducibility
-        # if seed is not None:
-        #     set_seed(seed)
-        # self._seed = seed
-        
+
         # Device and dtype
         self.dtype = dtype
         
@@ -401,11 +399,13 @@ class Algorithm(nn.Module, ABC):
         fitness = self._evaluate(population)
         
         # Initialize state
-        self.state.population = population
+        # Always reference the registered _population (nn.Parameter or buffer)
+        # to ensure gradient flow in differentiable mode and a single source of truth.
+        self.state.population = self._population
         self.state.fitness = fitness
         self.state.generation = 0
         self.state.n_evals = self.pop_size
-        self.state.update_best(population, fitness)
+        self.state.update_best(self._population, fitness)
         
         # Algorithm-specific setup
         self._setup()
@@ -648,7 +648,6 @@ class Algorithm(nn.Module, ABC):
                 "n_offsprings": self.n_offsprings,
                 "differentiable": self.differentiable,
                 "adaptive": self.adaptive,
-                # "seed": self._seed,
             },
             "is_initialized": self._is_initialized,
         }

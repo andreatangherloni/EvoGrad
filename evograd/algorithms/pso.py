@@ -458,13 +458,29 @@ class PSO(Algorithm):
         new_p_best: Tensor,
         new_p_best_fitness: Tensor,
     ) -> None:
-        """Update all PSO state tensors."""
+        """Update all PSO state tensors.
+
+        In differentiable mode the SGD optimiser has already nudged
+        ``self._population`` by a gradient step (P₀ → P₀ − lr·∇).
+        The PSO velocity update produced ``new_pos = P₀ + v``.
+        We combine both forces so that the final position is
+        ``P₀ + v − lr·∇``, preserving the gradient correction that
+        would otherwise be overwritten by ``copy_(new_pos)``.
+        """
         with torch.no_grad():
-            self._population.copy_(new_pos)
+            if self.differentiable and isinstance(self._population, nn.Parameter):
+                # Recover pre-velocity positions and extract the gradient delta
+                old_pos = new_pos - new_velocity          # P₀
+                grad_delta = self._population.data - old_pos  # −lr·∇
+                combined = new_pos + grad_delta           # P₀ + v − lr·∇
+                combined = torch.clamp(combined, self.xl, self.xu)
+                self._population.copy_(combined)
+            else:
+                self._population.copy_(new_pos)
             self._velocity.copy_(new_velocity)
             self._p_best.copy_(new_p_best)
             self._p_best_fitness.copy_(new_p_best_fitness)
-        
+
         self.state.fitness = new_fitness
         self.state.population = self._population
     

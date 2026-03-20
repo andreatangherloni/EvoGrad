@@ -29,6 +29,13 @@ Modes:
     - adaptive=True, differentiable=True: Both adaptation coefficients
         and mean are learnable
 
+Numerical note:
+    The covariance matrix is stored via its Cholesky factor ``L``.  In
+    differentiable mode, gradient-based updates to ``L`` may occasionally
+    produce a non-positive-definite covariance; ``_safe_cholesky`` handles
+    this with cascading fallbacks (eigenvalue correction → regularisation
+    → identity reset). See its docstring for details.
+
 Example:
     >>> from evograd.algorithms import CMAES
     >>> from evograd.core import Problem, minimize
@@ -767,13 +774,25 @@ class CMAES(Algorithm):
     def _safe_cholesky(self, C: Tensor) -> Tensor:
         """
         Compute Cholesky decomposition with robust fallback.
-        
+
         If standard Cholesky fails, applies eigenvalue correction
         and regularization to ensure positive definiteness.
-        
+
+        **Numerical risk in differentiable mode:** When the Cholesky factor
+        ``L`` is updated via gradient descent (``adaptive=True`` or
+        ``differentiable=True``), the optimizer step may push the
+        reconstructed covariance matrix ``C = L @ L.T`` towards a
+        non-positive-definite region. The cascading fallbacks below handle
+        this gracefully, but gradient-based updates can still introduce
+        noise through the eigendecomposition path. For an alternative that
+        guarantees PD by construction, consider a log-Cholesky
+        parameterisation (``L_diag = exp(l_diag)``). The current approach
+        is retained for simplicity and compatibility with the classical
+        CMA-ES update path.
+
         Args:
             C: Covariance matrix [n_var, n_var].
-        
+
         Returns:
             Lower triangular Cholesky factor L where C ≈ L @ L.T.
         """

@@ -297,16 +297,9 @@ class Mutation(nn.Module, ABC):
         self._clamp_temperature()
         return self._mutate(x, xl, xu, **kwargs)
     
-    def __call__(
-        self,
-        x: Tensor,
-        xl: Optional[Tensor] = None,
-        xu: Optional[Tensor] = None,
-        problem: Optional["Problem"] = None,
-        **kwargs,
-    ) -> Tensor:
-        """Apply mutation (alias for forward)."""
-        return self.forward(x, xl, xu, problem, **kwargs)
+    # Note: Do NOT override __call__. nn.Module.__call__ dispatches to
+    # forward() and fires registered hooks (forward_pre_hooks, forward_hooks,
+    # and the autograd profiler). Overriding __call__ would bypass all of these.
 
 
 # =============================================================================

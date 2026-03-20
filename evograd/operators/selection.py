@@ -194,15 +194,9 @@ class Selection(nn.Module, ABC):
             return result[0]
         return result
     
-    def __call__(
-        self,
-        population: Tensor,
-        fitness: Tensor,
-        n_select: Optional[int] = None,
-        return_indices: bool = False,
-    ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
-        """Select parents (alias for forward)."""
-        return self.forward(population, fitness, n_select, return_indices)
+    # Note: Do NOT override __call__. nn.Module.__call__ dispatches to
+    # forward() and fires registered hooks (forward_pre_hooks, forward_hooks,
+    # and the autograd profiler). Overriding __call__ would bypass all of these.
 
 
 # =============================================================================

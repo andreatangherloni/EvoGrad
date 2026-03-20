@@ -259,14 +259,9 @@ class Crossover(nn.Module, ABC):
         self._clamp_temperature()
         return self._crossover(parent1, parent2, **kwargs)
     
-    def __call__(
-        self,
-        parent1: Tensor,
-        parent2: Tensor,
-        **kwargs,
-    ) -> Tensor:
-        """Apply crossover (alias for forward)."""
-        return self.forward(parent1, parent2, **kwargs)
+    # Note: Do NOT override __call__. nn.Module.__call__ dispatches to
+    # forward() and fires registered hooks (forward_pre_hooks, forward_hooks,
+    # and the autograd profiler). Overriding __call__ would bypass all of these.
 
 
 # =============================================================================
@@ -688,6 +683,16 @@ class ExponentialCrossover(Crossover):
     Note:
         Exponential crossover tends to preserve more structure
         from the target vector compared to binomial crossover.
+
+    .. warning:: Differentiability caveat
+
+        The contiguous-segment mask is built via ``torch.cumprod`` over
+        Bernoulli draws. While technically differentiable, the gradient
+        signal through ``cumprod`` of near-binary values is extremely
+        noisy in practice — small perturbations in early continuation
+        probabilities can flip the entire segment length. For reliable
+        gradient-based hyperparameter learning, prefer
+        :class:`BinomialCrossover` with ``adaptive=True``.
     """
     
     def __init__(
