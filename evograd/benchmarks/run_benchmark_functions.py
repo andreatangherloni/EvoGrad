@@ -578,7 +578,7 @@ def run_evograd_single(
 ) -> RunResult:
     """Run a single EvoGrad optimization."""
     _worker_init()  # Ensure thread limits in worker
-    
+
     if not EVOGRAD_AVAILABLE:
         return RunResult(
             algorithm=algorithm_name, config=config, function=func_name,
@@ -586,9 +586,14 @@ def run_evograd_single(
             n_evals=0, n_gen=0, wall_time=0.0, success=False,
             error_message=f"EvoGrad not available: {EVOGRAD_IMPORT_ERROR}",
         )
-    
-    torch.manual_seed(seed)
+
+    # Comprehensive seeding for reproducibility
+    import random
+    random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     
     start_time = time.time()
     
@@ -734,9 +739,14 @@ def run_adam_single(
 ) -> RunResult:
     """Run a single Adam optimization."""
     _worker_init()  # Ensure thread limits in worker
-    
-    torch.manual_seed(seed)
+
+    # Comprehensive seeding for reproducibility
+    import random
+    random.seed(seed)
     np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     
     start_time = time.time()
     
@@ -826,6 +836,7 @@ def run_benchmark_parallel(
     include_adam: bool = True,
     adam_lr: float = 0.05,
     n_workers: int = -1,
+    base_seed: int = 0,
 ) -> BenchmarkResults:
     """Run full benchmark suite in parallel."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -851,30 +862,33 @@ def run_benchmark_parallel(
     jobs = []
     for func_name in functions:
         for config in configs:
-            for seed in range(n_runs):
+            for run_idx in range(n_runs):
+                seed = base_seed + run_idx
                 job = {
                     "algorithm": algorithm_name, "config": config, "function": func_name,
                     "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
-                    "max_evals": max_evals, "pop_size": pop_size, 
+                    "max_evals": max_evals, "pop_size": pop_size,
                     "lr_pop": lr_pop, "lr_hyper": lr_hyper, "grad_clip_pop": grad_clip_pop,
                     "grad_clip_hyper": grad_clip_hyper, "device": device,
                 }
                 if is_adam:
                     job["adam_lr"] = adam_lr
                 jobs.append(job)
-        
+
         # Add pymoo baseline (not for Adam algorithm)
         if include_pymoo and PYMOO_AVAILABLE and not is_adam:
-            for seed in range(n_runs):
+            for run_idx in range(n_runs):
+                seed = base_seed + run_idx
                 jobs.append({
                     "algorithm": algorithm_name, "config": "pymoo", "function": func_name,
                     "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
                     "max_evals": max_evals, "pop_size": pop_size, "device": "cpu",
                 })
-        
+
         # Add Adam baseline (not for Adam algorithm)
         if include_adam and not is_adam:
-            for seed in range(n_runs):
+            for run_idx in range(n_runs):
+                seed = base_seed + run_idx
                 jobs.append({
                     "algorithm": algorithm_name, "config": "Adam", "function": func_name,
                     "n_var": n_var, "xl": xl, "xu": xu, "seed": seed,
@@ -1080,8 +1094,25 @@ Examples:
     parser.add_argument("--lr_hyper", type=float, default=-1)
     parser.add_argument("--grad_clip_pop", type=float, default=-1)
     parser.add_argument("--grad_clip_hyper", type=float, default=-1)
-    
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Enable deterministic mode for reproducibility (may be slower)")
+    parser.add_argument("--base_seed", type=int, default=0,
+                        help="Base seed for random number generation (default: 0)")
+
     args = parser.parse_args()
+
+    # Enable deterministic mode if requested
+    if args.deterministic:
+        import random
+        import numpy as np
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        if hasattr(torch, 'use_deterministic_algorithms'):
+            try:
+                torch.use_deterministic_algorithms(True)
+            except Exception:
+                pass  # Some operations may not support deterministic mode
+        print("Deterministic mode enabled")
     
     # List functions mode
     if args.list_functions:
@@ -1166,6 +1197,7 @@ Examples:
         include_adam=not args.no_adam,
         adam_lr=args.adam_lr,
         n_workers=args.workers,
+        base_seed=args.base_seed,
     )
     
     print_summary(results)
