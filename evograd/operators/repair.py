@@ -134,16 +134,10 @@ class Repair(nn.Module, ABC):
         
         return self._repair(x, xl, xu)
     
-    def __call__(
-        self,
-        x: Tensor,
-        xl: Optional[Tensor] = None,
-        xu: Optional[Tensor] = None,
-        problem: Optional["Problem"] = None,
-    ) -> Tensor:
-        """Apply repair (alias for forward)."""
-        return self.forward(x, xl, xu, problem)
-    
+    # Note: Do NOT override __call__. nn.Module.__call__ dispatches to
+    # forward() and fires registered hooks (forward_pre_hooks, forward_hooks,
+    # and the autograd profiler). Overriding __call__ would bypass all of these.
+
     def is_within_bounds(
         self,
         x: Tensor,

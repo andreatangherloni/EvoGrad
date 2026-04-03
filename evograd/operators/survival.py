@@ -188,6 +188,7 @@ class Survival(nn.Module, ABC):
         logits: Tensor,
         k: int,
         dim: int = 0,
+        eps:float = 1e-8, 
     ) -> Tensor:
         """
         Differentiable top-k without replacement using sequential Gumbel-Softmax.
@@ -316,20 +317,9 @@ class Survival(nn.Module, ABC):
             n_survive,
         )
     
-    def __call__(
-        self,
-        parents: Tensor,
-        parent_fitness: Tensor,
-        offspring: Tensor,
-        offspring_fitness: Tensor,
-        n_survive: Optional[int] = None,
-    ) -> Tuple[Tensor, Tensor]:
-        """Apply survival selection (alias for forward)."""
-        return self.forward(
-            parents, parent_fitness,
-            offspring, offspring_fitness,
-            n_survive,
-        )
+    # Note: Do NOT override __call__. nn.Module.__call__ dispatches to
+    # forward() and fires registered hooks (forward_pre_hooks, forward_hooks,
+    # and the autograd profiler). Overriding __call__ would bypass all of these.
 
 
 # =============================================================================

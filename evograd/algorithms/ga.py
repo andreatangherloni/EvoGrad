@@ -14,7 +14,6 @@ All operators are pluggable via dependency injection (pymoo-style),
 allowing flexible customisation of the algorithm behavior.
 
 Differentiable Mode:
-    Differentiable Mode:
     When `differentiable=True`, the population is stored as nn.Parameter,
     enabling gradient flow through the entire evolutionary cycle.
     
