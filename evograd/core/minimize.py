@@ -250,6 +250,22 @@ def minimize(
         algorithm.xl = problem.xl
         algorithm.xu = problem.xu
 
+        # Re-evaluate the current population on the new problem so that
+        # fitness values (including personal bests in PSO) are consistent
+        # with the new objective.  Without this, stale fitness values from
+        # the old problem prevent the algorithm from accepting any new
+        # solutions (e.g., surrogate fitness ~0.003 vs ODE fitness ~200).
+        with torch.no_grad():
+            new_fitness = algorithm._evaluate(algorithm.population)
+            algorithm.state.fitness = new_fitness
+            algorithm.state.best_fitness = float('inf')
+            algorithm.state.update_best(algorithm.population, new_fitness)
+
+            # PSO: re-evaluate personal bests on the new problem
+            if hasattr(algorithm, '_p_best') and hasattr(algorithm, '_p_best_fitness'):
+                pb_fitness = algorithm._evaluate(algorithm._p_best)
+                algorithm._p_best_fitness.copy_(pb_fitness)
+
         # Update termination budget to add to existing evaluations/generations
         _update_termination_budget(termination, algorithm)
 

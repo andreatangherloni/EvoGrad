@@ -102,7 +102,7 @@ class AlgorithmState:
     def update_best(self, population: Tensor, fitness: Tensor) -> None:
         """Update best solution if improved."""
         best_idx = torch.argmin(fitness)
-        best_val = float(fitness[best_idx])
+        best_val = float(fitness[best_idx].detach())
         
         if best_val < self.best_fitness:
             self.best_fitness = best_val
