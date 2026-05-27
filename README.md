@@ -95,10 +95,10 @@ ga = GA(pop_size=100, differentiable=False)
 # Fully differentiable GA with custom operators
 ga = GA(
     pop_size=100,
-    selection=RouletteSelection(differentiable=True, learn_temperature=True),
-    crossover=SBXCrossover(differentiable=True, learn_eta=True, learn_prob=True),
-    mutation=PolynomialMutation(differentiable=True, learn_eta=True, learn_prob=True),
-    survival=MergeSurvival(selection=RouletteSelection(differentiable=True)),
+    selection=RouletteSelection(adaptive=True, learn_temperature=True),
+    crossover=SBXCrossover(adaptive=True, learn_eta=True, learn_prob=True),
+    mutation=PolynomialMutation(adaptive=True, learn_eta=True, learn_prob=True),
+    survival=MergeSurvival(elitism=True, adaptive=True),
     differentiable=True,  # Makes population learnable
 )
 ```
@@ -107,7 +107,7 @@ ga = GA(
 |-----------|--------|
 | `differentiable=False` | Classical GA with discrete operators |
 | `differentiable=True` | Population is an `nn.Parameter` (learnable via backprop) |
-| Operator `differentiable=True` | Operator uses Gumbel-Softmax/Binary-Concrete for gradient flow |
+| Operator `adaptive=True` | Operator uses Gumbel-Softmax/Binary-Concrete for gradient flow |
 | Operator `learn_*=True` | Operator hyperparameters become learnable `nn.Parameter` |
 
 ### Differential Evolution (DE)
@@ -148,10 +148,10 @@ de = DE(pop_size=100, variant="DE/current-to-best/1/bin", adaptive=True, differe
 PSO uses the same **algorithm-level flags** as DE:
 
 ```python
-from evograd.algorithms import PSO, pso_constriction, pso_adaptive
+from evograd.algorithms import PSO, pso_constriction, pso_default
 
 # Classical PSO
-pso = PSO(pop_size=100, inertia=0.7, c1=1.5, c2=1.5)
+pso = PSO(pop_size=100, w=0.7, c1=1.5, c2=1.5)
 
 # Adaptive PSO (learnable inertia, c1, c2)
 pso = PSO(pop_size=100, adaptive=True)
@@ -229,7 +229,7 @@ EvoGrad provides a comprehensive library of evolutionary operators:
 | `BlendCrossover` | BLX-α crossover | ✓ |
 | `ArithmeticCrossover` | Weighted average | ✓ |
 | `UniformCrossover` | Gene-wise uniform swap | ✓ |
-| `SimulatedBinaryCrossover` | Alias for SBX | ✓ |
+| `NPointCrossover` | N-point crossover | ✓ |
 
 ### Mutation
 | Operator | Description | Differentiable |
@@ -237,21 +237,22 @@ EvoGrad provides a comprehensive library of evolutionary operators:
 | `PolynomialMutation` | Polynomial bounded mutation | ✓ |
 | `GaussianMutation` | Additive Gaussian noise | ✓ |
 | `UniformMutation` | Uniform random replacement | ✓ |
-| `AdaptiveMutation` | Self-adaptive mutation rates | ✓ |
+| `NonUniformMutation` | Annealed mutation strength | ✓ |
 
 ### Survival
 | Operator | Description |
 |----------|-------------|
 | `MergeSurvival` | (μ+λ) with optional elitism |
-| `ReplacementSurvival` | (μ,λ) generational replacement |
-| `AgingSurvival` | Age-based replacement |
+| `CommaSurvival` | (μ,λ) generational replacement |
+| `ReplaceWorstSurvival` | Steady-state worst replacement |
+| `AgeSurvival` | Age-based replacement |
 | `FitnessSurvival` | Pure fitness-based truncation |
 
 ### Repair
 | Operator | Description |
 |----------|-------------|
 | `BoundsRepair` | Clamp to bounds |
-| `ReflectionRepair` | Bounce off boundaries |
+| `ReflectRepair` | Bounce off boundaries |
 | `WrapRepair` | Toroidal wrap-around |
 | `RandomRepair` | Random resampling |
 
@@ -263,7 +264,7 @@ EvoGrad provides a comprehensive library of evolutionary operators:
 import torch
 import torch.nn as nn
 from evograd.algorithms import CMAES
-from evograd.core import Problem
+from evograd.core import Problem, minimize
 from evograd.core.termination import MaxEvaluations
 
 
@@ -317,7 +318,7 @@ print(f"Final loss: {result.best_fitness:.6f}")
 ### Callbacks for Logging
 
 ```python
-from evograd.core import minimize
+from evograd.core import minimize, MaxEvaluations
 from evograd.utils import HistoryCallback, PrintCallback
 
 callbacks = [
