@@ -20,14 +20,21 @@
 ## 📦 Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/evograd.git
-cd evograd
+# From PyPI (the import name is `evograd`)
+pip install evograd-diff
+```
 
-# Install dependencies
-pip install torch numpy
+Or install directly from the repository:
 
-# Install in development mode
+```bash
+pip install "git+https://github.com/andreatangherloni/EvoGrad.git"
+```
+
+For local development:
+
+```bash
+git clone https://github.com/andreatangherloni/EvoGrad.git
+cd EvoGrad
 pip install -e .
 ```
 

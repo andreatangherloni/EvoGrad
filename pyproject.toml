@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "evograd"
+name = "evograd-diff"
 version = "0.1.0"
 description = "PyTorch-based framework for differentiable evolutionary computation and swarm intelligence"
 readme = "README.md"
