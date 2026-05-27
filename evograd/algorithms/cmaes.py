@@ -281,15 +281,18 @@ class CMAES(Algorithm):
     # Setup
     # =========================================================================
     
+    def _setup_pop_size(self) -> None:
+        """Compute the default CMA-ES population size (lambda) before sampling."""
+        # Compute default population size if not provided
+        if self._requested_pop_size is None:
+            n_var = self.problem.n_var
+            self.pop_size = 4 + int(3 * math.log(n_var))
+            self.n_offsprings = self.pop_size
+
     def _setup(self) -> None:
         """CMA-ES specific setup after initialization."""
         n_var = self.problem.n_var
-        
-        # Compute default population size if not provided
-        if self._requested_pop_size is None:
-            self.pop_size = 4 + int(3 * math.log(n_var))
-            self.n_offsprings = self.pop_size
-        
+
         # Initialize restart state
         self.restart_state.initial_pop_size = self.pop_size
         self.restart_state.current_pop_size = self.pop_size

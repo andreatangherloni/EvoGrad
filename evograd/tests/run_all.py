@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from tests.test_utils import run_all_tests as test_utils
 from tests.test_core import run_all_tests as test_core
 from tests.test_operators import run_all_tests as test_operators
+from tests.test_cmaes import run_all_tests as test_cmaes
 
 
 def run_all():
@@ -45,7 +46,13 @@ def run_all():
     print("▶ RUNNING OPERATORS TESTS")
     print("▶"*60)
     results['operators'] = test_operators()
-    
+
+    # Run CMA-ES tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING CMA-ES TESTS")
+    print("▶"*60)
+    results['cmaes'] = test_cmaes()
+
     # Summary
     print("\n\n" + "█"*60)
     print("█" + " "*58 + "█")

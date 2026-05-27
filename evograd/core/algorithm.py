@@ -322,10 +322,21 @@ class Algorithm(nn.Module, ABC):
     # Optional Hooks (can be overridden)
     # =========================================================================
     
+    def _setup_pop_size(self) -> None:
+        """
+        Resolve the population size before the initial population is sampled.
+
+        Override for algorithms that derive pop_size from the problem
+        (e.g. CMA-ES default lambda = 4 + floor(3*ln(n))). Called near the
+        start of initialize(), after the problem is attached but before
+        sampling, so the population is allocated at the final size.
+        """
+        pass
+
     def _setup(self) -> None:
         """
         One-time setup after initialisation.
-        
+
         Override to perform algorithm-specific setup that requires
         the problem and population to be initialized.
         Called at the end of initialize().
@@ -370,14 +381,17 @@ class Algorithm(nn.Module, ABC):
         
         # Move problem bounds to device
         self.register_buffer(
-            "xl", 
+            "xl",
             problem.xl.to(device=self.device, dtype=self.dtype)
         )
         self.register_buffer(
             "xu",
             problem.xu.to(device=self.device, dtype=self.dtype)
         )
-        
+
+        # Resolve final population size (e.g. CMA-ES auto lambda) before sampling
+        self._setup_pop_size()
+
         # Create initial population using sampling operator
         population = self.sampling(self.pop_size, problem)
         
@@ -686,13 +700,15 @@ class Algorithm(nn.Module, ABC):
         mode = "differentiable" if self.differentiable else "classical"
         status = "initialized" if self._is_initialized else "not initialized"
         n_var = self.n_var if self.problem else "?"
+        # device is only assigned in initialize(); fall back before then.
+        device = getattr(self, "device", "?")
         return (
             f"{self.__class__.__name__}("
             f"pop_size={self.pop_size}, "
             f"n_var={n_var}, "
             f"mode={mode}, "
             f"status={status}, "
-            f"device={self.device})"
+            f"device={device})"
         )
     
     def summary(self) -> str:
