@@ -17,6 +17,8 @@ from tests.test_utils import run_all_tests as test_utils
 from tests.test_core import run_all_tests as test_core
 from tests.test_operators import run_all_tests as test_operators
 from tests.test_cmaes import run_all_tests as test_cmaes
+from tests.test_ga import run_all_tests as test_ga
+from tests.test_per_individual import main as test_per_individual
 
 
 def run_all():
@@ -52,6 +54,18 @@ def run_all():
     print("▶ RUNNING CMA-ES TESTS")
     print("▶"*60)
     results['cmaes'] = test_cmaes()
+
+    # Run GA tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING GA TESTS")
+    print("▶"*60)
+    results['ga'] = test_ga()
+
+    # Run per-individual parameter tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING PER-INDIVIDUAL TESTS")
+    print("▶"*60)
+    results['per_individual'] = test_per_individual()
 
     # Summary
     print("\n\n" + "█"*60)

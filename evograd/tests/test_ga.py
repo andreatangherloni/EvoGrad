@@ -85,10 +85,10 @@ def test_ga_creation():
     print("\n2. Testing GA with custom operators...")
     ga = GA(
         pop_size=30,
-        selection=RouletteSelection(differentiable=True),
-        crossover=BlendCrossover(alpha=0.5, differentiable=True),
-        mutation=GaussianMutation(sigma=0.1, differentiable=True),
-        survival=MergeSurvival(elitism=True, n_elite=2, differentiable=True),
+        selection=RouletteSelection(adaptive=True),
+        crossover=BlendCrossover(alpha=0.5, adaptive=True),
+        mutation=GaussianMutation(sigma=0.1, adaptive=True),
+        survival=MergeSurvival(elitism=True, n_elite=2, adaptive=True),
     )
     print(f"   Created: {ga}")
     print(f"   Survival: {ga.survival}")
@@ -165,10 +165,10 @@ def test_ga_step():
     ga = GA(
         pop_size=30,
         sampling=UniformSampling(seed=42),
-        selection=TournamentSelection(tournament_size=3, differentiable=True),
-        crossover=SBXCrossover(eta=15, prob=0.9, differentiable=True),
-        mutation=PolynomialMutation(eta=20, differentiable=True),
-        survival=MergeSurvival(n_survive=30, elitism=True, n_elite=1, differentiable=True),
+        selection=TournamentSelection(tournament_size=3, adaptive=True),
+        crossover=SBXCrossover(eta=15, prob=0.9, adaptive=True),
+        mutation=PolynomialMutation(eta=20, adaptive=True),
+        survival=MergeSurvival(n_survive=30, elitism=True, n_elite=1, adaptive=True),
         differentiable=True,
     )
     ga.initialize(problem)
@@ -212,9 +212,7 @@ def test_survival_strategies():
     print("\n1. Testing MergeSurvival (mu+lambda)...")
     ga_plus = GA(
         pop_size=20,
-        survival=MergeSurvival(n_survive=20, elitism=True, n_elite=1),
-        seed=42,
-    )
+        survival=MergeSurvival(n_survive=20, elitism=True, n_elite=1),    )
     ga_plus.initialize(problem)
     for _ in range(5):
         ga_plus.step()
@@ -225,9 +223,7 @@ def test_survival_strategies():
     ga_comma_inst = GA(
         pop_size=20,
         n_offsprings=40,  # Must be >= pop_size
-        survival=CommaSurvival(n_survive=20, elitism=True, n_elite=1),
-        seed=42,
-    )
+        survival=CommaSurvival(n_survive=20, elitism=True, n_elite=1),    )
     ga_comma_inst.initialize(problem)
     for _ in range(5):
         ga_comma_inst.step()
@@ -238,9 +234,7 @@ def test_survival_strategies():
     ga_replace = GA(
         pop_size=20,
         n_offsprings=5,
-        survival=ReplaceWorstSurvival(n_survive=20, elitism=True, n_elite=1),
-        seed=42,
-    )
+        survival=ReplaceWorstSurvival(n_survive=20, elitism=True, n_elite=1),    )
     ga_replace.initialize(problem)
     for _ in range(20):  # More generations since fewer offspring per gen
         ga_replace.step()
@@ -250,9 +244,7 @@ def test_survival_strategies():
     print("\n4. Testing FitnessSurvival (pure truncation)...")
     ga_fitness = GA(
         pop_size=20,
-        survival=FitnessSurvival(n_survive=20),
-        seed=42,
-    )
+        survival=FitnessSurvival(n_survive=20),    )
     ga_fitness.initialize(problem)
     for _ in range(5):
         ga_fitness.step()
@@ -278,9 +270,7 @@ def test_elitism():
     print("\n1. Testing GA with elitism...")
     ga_elite = GA(
         pop_size=20,
-        survival=MergeSurvival(n_survive=20, elitism=True, n_elite=1),
-        seed=42,
-    )
+        survival=MergeSurvival(n_survive=20, elitism=True, n_elite=1),    )
     ga_elite.initialize(problem)
     
     best_values = [ga_elite.best_fitness]
@@ -299,7 +289,6 @@ def test_elitism():
     ga_no_elite = GA(
         pop_size=20,
         survival=FitnessSurvival(n_survive=20),  # No elitism
-        seed=42,
     )
     ga_no_elite.initialize(problem)
     
@@ -325,9 +314,7 @@ def test_differentiable_mode():
     
     ga = GA(
         pop_size=20,
-        differentiable=True,
-        seed=42,
-    )
+        differentiable=True,    )
     ga.initialize(problem)
     
     # Create optimizer for learnable parameters
@@ -386,9 +373,7 @@ def test_state_persistence():
         sampling=UniformSampling(seed=42),
         selection=TournamentSelection(tournament_size=3),
         crossover=SBXCrossover(eta=15, prob=0.9),
-        mutation=PolynomialMutation(eta=20),
-        seed=42,
-    )
+        mutation=PolynomialMutation(eta=20),    )
     ga1.initialize(problem)
     
     for _ in range(10):
@@ -408,9 +393,7 @@ def test_state_persistence():
         sampling=UniformSampling(seed=42),
         selection=TournamentSelection(tournament_size=3),
         crossover=SBXCrossover(eta=15, prob=0.9),
-        mutation=PolynomialMutation(eta=20),
-        seed=0,  # Different seed
-    )
+        mutation=PolynomialMutation(eta=20),    )
     ga2.initialize(problem)
     
     print(f"\n2. New GA before load:")
@@ -475,9 +458,7 @@ def test_convergence():
         selection=TournamentSelection(tournament_size=3),
         crossover=SBXCrossover(eta=15, prob=0.9),
         mutation=PolynomialMutation(eta=20),
-        survival=MergeSurvival(n_survive=50, elitism=True, n_elite=1),
-        seed=42,
-    )
+        survival=MergeSurvival(n_survive=50, elitism=True, n_elite=1),    )
     ga.initialize(problem)
     
     print(f"\n1. Running GA for 100 generations...")
@@ -513,10 +494,10 @@ def test_hyperparams():
     
     ga = GA(
         pop_size=20,
-        selection=TournamentSelection(tournament_size=3, differentiable=True),
-        crossover=SBXCrossover(eta=15, prob=0.9, differentiable=True),
-        mutation=PolynomialMutation(eta=20, differentiable=True),
-        survival=MergeSurvival(n_survive=20, elitism=True, n_elite=2, differentiable=True),
+        selection=TournamentSelection(tournament_size=3, adaptive=True),
+        crossover=SBXCrossover(eta=15, prob=0.9, adaptive=True),
+        mutation=PolynomialMutation(eta=20, adaptive=True),
+        survival=MergeSurvival(n_survive=20, elitism=True, n_elite=2, adaptive=True),
     )
     ga.initialize(problem)
     ga.step()

@@ -266,7 +266,7 @@ def test_differentiable_mode():
     
     # Differentiable operators
     print("\n1. SBXCrossover with gradient flow:")
-    sbx = SBXCrossover(eta=15, prob=0.9, differentiable=True, learn_eta=True)
+    sbx = SBXCrossover(eta=15, prob=0.9, adaptive=True, learn_eta=True)
     
     p1 = torch.nn.Parameter(torch.randn(N, D))
     p2 = torch.randn(N, D)
@@ -282,7 +282,7 @@ def test_differentiable_mode():
     
     # PolynomialMutation with gradient flow
     print("\n2. PolynomialMutation with gradient flow:")
-    mutation = PolynomialMutation(eta=20, prob=0.1, differentiable=True, learn_eta=True)
+    mutation = PolynomialMutation(eta=20, prob=0.1, adaptive=True, learn_eta=True)
     
     x = torch.nn.Parameter(torch.randn(N, D))
     xl = torch.zeros(D)
@@ -305,22 +305,30 @@ def main():
     print("\n" + "#" * 70)
     print("# Per-Individual/Per-Gene Parameter Support Tests")
     print("#" * 70)
-    
-    test_crossover_configurations()
-    test_mutation_configurations()
-    test_shade_style_usage()
-    test_differentiable_mode()
-    
-    print("\n" + "=" * 70)
-    print("ALL TESTS PASSED! ✓")
-    print("=" * 70)
-    
-    print("\nSummary of Four Configurations:")
-    print("  1. Fixed (scalar)     - Same value for all")
-    print("  2. Per-gene [D]       - Different per variable")
-    print("  3. Per-individual [N] - Different per individual (SHADE needs this!)")
-    print("  4. Full matrix [N, D] - Maximum flexibility")
+
+    try:
+        test_crossover_configurations()
+        test_mutation_configurations()
+        test_shade_style_usage()
+        test_differentiable_mode()
+
+        print("\n" + "=" * 70)
+        print("ALL TESTS PASSED! ✓")
+        print("=" * 70)
+
+        print("\nSummary of Four Configurations:")
+        print("  1. Fixed (scalar)     - Same value for all")
+        print("  2. Per-gene [D]       - Different per variable")
+        print("  3. Per-individual [N] - Different per individual (SHADE needs this!)")
+        print("  4. Full matrix [N, D] - Maximum flexibility")
+        return True
+    except Exception as e:
+        print(f"\n✗ TEST FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 if __name__ == "__main__":
-    main()
+    success = main()
+    sys.exit(0 if success else 1)
