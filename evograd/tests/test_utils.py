@@ -183,8 +183,10 @@ def test_callbacks():
     
     print(f"   Tracked generations: {len(history_cb.generations)}")
     print(f"   Best fitness history: {history_cb.best_fitness[:3]}...")
-    assert len(history_cb.generations) == 5
-    assert len(history_cb.best_fitness) == 5
+    # on_optimisation_start records the initial state, then each of the 5
+    # on_generation_end calls records one more -> 1 + 5 = 6 entries.
+    assert len(history_cb.generations) == 6
+    assert len(history_cb.best_fitness) == 6
     
     # Test PrintCallback
     print("\n2. Testing PrintCallback...")
