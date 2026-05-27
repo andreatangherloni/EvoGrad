@@ -170,7 +170,7 @@ def test_selection():
     print("\n2. Testing TournamentSelection (differentiable)...")
     tournament_diff = TournamentSelection(
         tournament_size=3,
-        differentiable=True,
+        adaptive=True,
         temperature=1.0,
         learn_temperature=True,
     )
@@ -247,7 +247,7 @@ def test_crossover():
     sbx_diff = SBXCrossover(
         eta=15,
         prob=0.9,
-        differentiable=True,
+        adaptive=True,
         learn_eta=True,
         learn_prob=True,
     )
@@ -274,7 +274,7 @@ def test_crossover():
     print(f"   Offspring shape: {offspring_bin.shape}")
     
     # Test differentiable binomial
-    binomial_diff = BinomialCrossover(cr=0.9, differentiable=True, learn_cr=True)
+    binomial_diff = BinomialCrossover(cr=0.9, adaptive=True, learn_cr=True)
     p1 = torch.nn.Parameter(parent1.clone())
     offspring_bin_diff = binomial_diff(p1, parent2)
     loss = offspring_bin_diff.sum()
@@ -343,7 +343,7 @@ def test_mutation():
     poly_diff = PolynomialMutation(
         eta=20,
         prob=0.1,
-        differentiable=True,
+        adaptive=True,
         learn_eta=True,
         learn_prob=True,
     )
@@ -367,7 +367,7 @@ def test_mutation():
     print(f"   With sigma_frac: ✓")
     
     # Test differentiable Gaussian
-    gauss_diff = GaussianMutation(sigma=0.1, differentiable=True, learn_sigma=True)
+    gauss_diff = GaussianMutation(sigma=0.1, adaptive=True, learn_sigma=True)
     pop_param = torch.nn.Parameter(population.clone())
     mutated_gauss_diff = gauss_diff(pop_param, xl, xu)
     loss = mutated_gauss_diff.sum()
@@ -592,18 +592,18 @@ def test_operator_integration():
     # Create differentiable operators
     selection_diff = TournamentSelection(
         tournament_size=3,
-        differentiable=True,
+        adaptive=True,
         temperature=1.0,
     )
     crossover_diff = SBXCrossover(
         eta=15,
         prob=0.9,
-        differentiable=True,
+        adaptive=True,
         learn_eta=True,
     )
     mutation_diff = GaussianMutation(
         sigma=0.1,
-        differentiable=True,
+        adaptive=True,
         learn_sigma=True,
     )
     

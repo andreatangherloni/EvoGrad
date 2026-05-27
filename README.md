@@ -42,7 +42,7 @@ pip install -e .
 
 ```python
 import torch
-from evograd.core import Problem, minimize
+from evograd.core import Problem, minimize, MaxEvaluations
 from evograd.algorithms import GA, DE, PSO, CMAES
 
 # Define an optimisation problem
@@ -55,22 +55,22 @@ problem = Problem(
 
 # Run with Genetic Algorithm
 ga = GA(pop_size=100, differentiable=True)
-result = minimize(problem, ga, max_evals=10000, seed=42)
+result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42)
 print(f"GA Best: {result.best_fitness:.6f}")
 
 # Run with Differential Evolution
 de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
-result = minimize(problem, de, max_evals=10000, seed=42)
+result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42)
 print(f"DE Best: {result.best_fitness:.6f}")
 
 # Run with Particle Swarm Optimisation
 pso = PSO(pop_size=100, adaptive=True, differentiable=True)
-result = minimize(problem, pso, max_evals=10000, seed=42)
+result = minimize(problem, pso, termination=MaxEvaluations(10000), seed=42)
 print(f"PSO Best: {result.best_fitness:.6f}")
 
 # Run with CMA-ES
 cmaes = CMAES(sigma=0.5, adaptive=True)
-result = minimize(problem, cmaes, max_evals=10000, seed=42)
+result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42)
 print(f"CMA-ES Best: {result.best_fitness:.6f}")
 ```
 
