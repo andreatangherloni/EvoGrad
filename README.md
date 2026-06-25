@@ -1,11 +1,14 @@
-# EvoGrad: Metaheuristics in a Differentiable Wonderland
+# EvoGrad: Accelerated Metaheuristics in a Differentiable Wonderland
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+">
   <img src="https://img.shields.io/badge/pytorch-2.0+-orange.svg" alt="PyTorch 2.0+">
   <img src="https://img.shields.io/badge/license-Apache%20License%202.0-blue.svg" alt="License: Apache-2.0">
+  <img src="https://img.shields.io/badge/IEEE%20CEC-2026-success.svg" alt="IEEE CEC 2026">
  
 </p>
+
+> 🎉 **EvoGrad has been accepted at [IEEE CEC 2026](#-citation)!**
 
 **EvoGrad** is a PyTorch-based framework for differentiable Evolutionary Computation and Swarm Intelligence. It bridges classical population-based optimisation with modern differentiable programming by enabling gradient flow through evolutionary operators.
 
@@ -394,11 +397,88 @@ EvoGrad makes evolutionary algorithms differentiable through:
 
 ## 📊 Benchmarks
 
-TODO
+EvoGrad ships a self-contained, **PyTorch-native benchmark suite** (`evograd.benchmarks`) together with a parallel runner that evaluates every algorithm in its four operating modes against two reference baselines.
+
+### Function library
+
+All functions share a common `BenchmarkFunction` interface (`f(x)` on an `(N, n_var)` batch, plus `.bounds` and the known optimum) and run on CPU/GPU/MPS.
+
+| Category | Functions |
+|----------|-----------|
+| **Classical — unimodal** | Sphere, Ellipsoid, SumOfDifferentPowers, Schwefel 2.22, Cigar, Discus, BentCigar, Rosenbrock, DixonPrice, Powell, Trid |
+| **Classical — multimodal** | Rastrigin, Ackley, Griewank, Schwefel, Levy, Michalewicz, Zakharov, Weierstrass, Alpine, Salomon, Styblinski–Tang |
+| **CEC 2017** (`F1`–`F30`) | Simple/unimodal (F1–F10), Hybrid (F11–F20), Composition (F21–F30) — the full competition suite, **rewritten from scratch in PyTorch** |
+| **Multi-Basin / Smoothed-Funnel** | `MultiBasinRastrigin`, `MultiBasinRosenbrock`, `DeceptiveLandscape` — designed for differentiable EAs |
+| **Transforms** | Shifted / Rotated / Scaled / Asymmetric / Oscillated / Biased wrappers for building custom variants |
+
+```python
+import torch
+from evograd.benchmarks.functions import Sphere, Rastrigin, get_cec2017_function, MultiBasinRastrigin
+
+f = get_cec2017_function(14, n_var=30)   # CEC 2017 F14 in 30D
+y = f(torch.randn(100, 30))              # batch evaluation -> shape [100]
+```
+
+The **Multi-Basin** functions aggregate `K` basins (each a full Rastrigin/Rosenbrock landscape) with a smooth *log-sum-exp* minimum, so the surface stays differentiable everywhere while still trapping pure gradient descent in distractor basins — exactly the setting where population search combined with gradient refinement pays off.
+
+### Running the benchmarks
+
+The runner evaluates the four EvoGrad modes — **Classical**, **Differentiable**, **Adaptive**, **Full** — and, by default, the **pymoo** and **Adam** (multi-start) baselines:
+
+```bash
+# 30 runs of DE on the full CEC 2017 suite in 30D (vs pymoo + Adam)
+python -m evograd.benchmarks.run_benchmark_functions -a DE -s cec2017 -D 30 -r 30
+
+# CMA-ES on the multi-basin functions, on GPU
+python -m evograd.benchmarks.run_benchmark_functions -a CMAES -s funnel -D 30 --device cuda
+
+# List every available function and suite
+python -m evograd.benchmarks.run_benchmark_functions --list_functions
+```
+
+Key flags: `-a {DE,SHADE,PSO,GA,CMAES,ADAM}`, `-s` suite (`classical`, `standard`, `cec2017[_simple|_hybrid|_composition]`, `funnel`, …), `-D` dimensionality, `-r` runs, `-p` population size, `--no_pymoo` / `--no_adam` to drop baselines. Plotting utilities live in `plot_benchmarks.py`.
+
+### Results
+
+The three differentiable variants are compared against the **Classical** baseline and pymoo:
+
+- **Adaptive** — learnable hyperparameters, purely stochastic variation (no gradient through the population).
+- **Diff** (Differentiable) — fixed hyperparameters, gradients refine the population.
+- **Full** — both: learnable hyperparameters *and* gradient-based population refinement.
+
+**CEC 2017 (30D & 100D).** 29 functions (F2 excluded, per the competition), search space `[-100, 100]^D`, 100 individuals, `10000·D` evaluations, 30 independent paired runs, one-sided Wilcoxon signed-rank test with Benjamini–Hochberg correction. Highlights:
+
+- Differentiable variants are **statistically significantly better than the classical baseline in ~31% of all comparisons**, and **never substantially worse** — gradient refinement can be added to EAs safely.
+- Gains concentrate where local refinement helps most: **GA (70.1%)** and **DE (46.0%)** of comparisons improved, versus **PSO (6.9%)** and **CMA-ES (1.1%)**, which already include strong built-in adaptation.
+- Across variants, **Full (41.4%) > Adaptive (35.3%) > Diff (16.4%)** — combining hyperparameter learning with population refinement helps the most, increasingly so at 100D.
+- CMA-ES is the strongest method overall (especially on hybrid/composition functions), and EvoGrad runs ~**3× faster** than the pymoo baselines on CPU *despite* the added gradient computation.
+
+**Multi-Basin Rastrigin** (`D=30`, bounds `[-5, 5]^D`, 150,000 evaluations, 30 runs). Every CMA-ES variant locates the global basin (best fitness `0.00`); a multi-start **Adam** baseline (100 parallel solutions) stays trapped in distractor basins:
+
+| Configuration | Best | Mean | Std | Time (s) |
+|---|---|---|---|---|
+| CMA-ES Classical | 0.00 | 2.22 | 3.04 | 25.66 |
+| CMA-ES Differentiable | 0.00 | 1.49 | 2.16 | 9.77 |
+| CMA-ES Adaptive | 0.00 | **0.99** | **1.36** | 45.24 |
+| CMA-ES Full | 0.00 | 1.29 | 2.12 | **7.94** |
+| Adam (multi-start, pop-based) | 116.41 | 153.77 | 13.98 | 3.88 |
+
+The **Adaptive** variant reaches the lowest mean/variance, while **Full** matches it closely at the **fastest** runtime — gradient flow yields large speed-ups while population search secures the global basin. Adam alone is **>2 orders of magnitude worse**, confirming that pure gradient descent cannot escape distractor basins.
+
+> Full experimental details are in the paper (see [Citation](#-citation)).
 
 ## 📖 Citation
 
-TBA
+EvoGrad was accepted at the **IEEE Congress on Evolutionary Computation (CEC) 2026**. If you use EvoGrad in your research, please cite:
+
+```bibtex
+@inproceedings{citterio2026evograd,
+  title     = {{EvoGrad}: Accelerated Metaheuristics in a Differentiable Wonderland},
+  author    = {Citterio, Beatrice F. R. and Papetti, Daniele M. and Dimitri, Giovanna Maria and Tangherloni, Andrea},
+  booktitle = {Proceedings of the IEEE Congress on Evolutionary Computation (CEC)},
+  year      = {2026},
+}
+```
 
 ## 📄 License
 
