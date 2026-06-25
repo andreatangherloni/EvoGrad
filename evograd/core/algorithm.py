@@ -523,26 +523,65 @@ class Algorithm(nn.Module, ABC):
         
         return self.state.best_fitness
     
-    def forward(self) -> Tensor:
+    def forward(self, reduction: str = "mean", live_selection: bool = True) -> Tensor:
         """
         PyTorch forward pass for differentiable optimisation.
-        
+
         In differentiable mode, this builds a computation graph
-        through the entire generation, returning the best fitness
-        as a differentiable scalar loss. Call update_state() after
+        through the entire generation and reduces the per-offspring
+        fitness to a scalar loss. Call update_state() after
         loss.backward() and optimizer.step() to commit changes.
-        
+
+        Args:
+            reduction: How to reduce the (n_offsprings,) offspring fitness
+                into the scalar loss that is backpropagated:
+                - 'mean' (default): average fitness — gradient reaches the
+                  whole population, driving every member downhill.
+                - 'sum': total fitness — same per-member gradient direction
+                  as 'mean', scaled by n_offsprings.
+                - 'min': best offspring only — gradient flows solely through
+                  the single best offspring's ancestry (sparse signal).
+            live_selection: Whether selection routing carries gradient back to
+                the population.
+                - True (default, "live"): re-evaluate the current population so
+                  the selection logits depend on the live parameter — the
+                  Gumbel-Softmax selection gradient then reaches the population
+                  (fully end-to-end differentiable generation). For a
+                  deterministic objective this re-evaluation reproduces the
+                  committed fitness values exactly, so it is graph
+                  reconstruction, not new sampling: it is intentionally NOT
+                  counted in the evaluation budget (n_evals). It is, however, a
+                  real extra objective pass (wall-clock/FLOPs). For a stochastic
+                  objective the values may differ from the committed fitness.
+                - False ("detached", memetic): selection uses the cached,
+                  detached committed fitness as fixed routing weights; gradient
+                  only refines positions. Cheaper (no extra pass), lower
+                  variance, and the correct choice for stochastic objectives.
+
         Returns:
-            Best fitness as a scalar tensor (for backprop).
-        
+            Reduced offspring fitness as a scalar tensor (for backprop).
+
         Raises:
             RuntimeError: If algorithm not initialized.
+            ValueError: If reduction is not one of 'mean', 'sum', 'min'.
         """
         if not self._is_initialized:
             raise RuntimeError(
                 "Algorithm not initialized. Call initialize(problem) first."
             )
-        
+
+        if reduction not in ("mean", "sum", "min"):
+            raise ValueError(
+                f"reduction must be one of 'mean', 'sum', 'min'; got {reduction!r}"
+            )
+
+        # Live selection: attach a fresh autograd graph to the parent fitness so
+        # selection gradients flow into the population. Deliberately does NOT
+        # increment n_evals (values match the committed fitness for a
+        # deterministic objective — this only rebuilds the graph).
+        if live_selection:
+            self.state.fitness = self._evaluate(self.population)
+
         # Generate offspring (differentiable)
         offspring = self._infill()
         
@@ -561,7 +600,12 @@ class Algorithm(nn.Module, ABC):
         self._pending_offspring = offspring
         self._pending_fitness = offspring_fitness
         
-        # Return best fitness as loss
+        # Reduce per-offspring fitness to the scalar loss for backprop.
+        if reduction == "mean":
+            return offspring_fitness.mean()
+        if reduction == "sum":
+            return offspring_fitness.sum()
+        # reduction == "min"
         return offspring_fitness.min()
     
     @torch.no_grad()

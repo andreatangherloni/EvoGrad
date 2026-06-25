@@ -168,6 +168,8 @@ def maximize(
     scheduler_patience: int = 50,
     scheduler_factor: float = 0.5,
     min_lr: float = 1e-6,
+    reduction: str = "mean",
+    live_selection: bool = True,
 ) -> Result:
     """
     Maximise an objective function using a population-based algorithm.
@@ -260,6 +262,8 @@ def maximize(
         scheduler_patience=scheduler_patience,
         scheduler_factor=scheduler_factor,
         min_lr=min_lr,
+        reduction=reduction,
+        live_selection=live_selection,
     )
     
     # Fix problem name in result

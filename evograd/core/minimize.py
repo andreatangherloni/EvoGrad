@@ -93,7 +93,9 @@ def minimize(
     scheduler_patience: int = 50,
     scheduler_factor: float = 0.5,
     min_lr: float = 1e-6,
-) -> Result:    
+    reduction: str = "mean",
+    live_selection: bool = True,
+) -> Result:
     
     """
     Minimise an objective function using a population-based algorithm.
@@ -169,7 +171,17 @@ def minimize(
             reducing LR (for 'plateau' scheduler).
         scheduler_factor: Factor to multiply LR when reducing.
         min_lr: Minimum learning rate.
-    
+        reduction: Reduction used to turn the (n_offsprings,) offspring
+            fitness into the scalar loss in differentiable mode:
+            'mean' (default), 'sum', or 'min'. Only used when backprop is
+            active; ignored in classical mode.
+        live_selection: If True (default), selection routing carries gradient
+            to the population via a per-generation re-evaluation of the current
+            population (not counted in n_evals; deterministic objectives only —
+            see Algorithm.forward). If False, selection uses the cached,
+            detached fitness (memetic; cheaper; for stochastic objectives).
+            Only used when backprop is active.
+
     Returns:
         Result object containing:
             - best_solution: Best solution found
@@ -381,6 +393,8 @@ def minimize(
                 hyper_params,
                 grad_clip_pop,
                 grad_clip_hyper,
+                reduction,
+                live_selection,
             )
         else:
             algorithm.step()
@@ -680,6 +694,8 @@ def _step_differentiable(
     hyper_params: Optional[List],
     grad_clip_pop: Optional[float],
     grad_clip_hyper: Optional[float],
+    reduction: str = "mean",
+    live_selection: bool = True,
 ) -> float:
     """
     Perform one generation step with gradient-based updates.
@@ -709,7 +725,7 @@ def _step_differentiable(
         opt.zero_grad(set_to_none=True)
     
     # Forward pass (builds computation graph)
-    loss = algorithm.forward()
+    loss = algorithm.forward(reduction=reduction, live_selection=live_selection)
     
     # Backward pass
     loss.backward()
