@@ -535,6 +535,7 @@ class Algorithm(nn.Module, ABC):
         Args:
             reduction: How to reduce the (n_offsprings,) offspring fitness
                 into the scalar loss that is backpropagated:
+
                 - 'mean' (default): average fitness — gradient reaches the
                   whole population, driving every member downhill.
                 - 'sum': total fitness — same per-member gradient direction
@@ -543,6 +544,7 @@ class Algorithm(nn.Module, ABC):
                   the single best offspring's ancestry (sparse signal).
             live_selection: Whether selection routing carries gradient back to
                 the population.
+
                 - True (default, "live"): re-evaluate the current population so
                   the selection logits depend on the live parameter — the
                   Gumbel-Softmax selection gradient then reaches the population

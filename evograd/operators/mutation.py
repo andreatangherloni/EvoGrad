@@ -720,10 +720,11 @@ class NonUniformMutation(Mutation):
     Non-uniform mutation with decreasing perturbation.
     
     The perturbation magnitude decreases over generations, allowing
-    large exploration early and fine-tuning later. Uses the formula:
+    large exploration early and fine-tuning later. Uses the formula::
+
         delta = (xu - x) * (1 - r^((1 - t/T)^b))  if coin flip
         delta = (x - xl) * (1 - r^((1 - t/T)^b))  otherwise
-    
+
     where t is current generation, T is max generations, r is random,
     and b controls the decay rate.
     

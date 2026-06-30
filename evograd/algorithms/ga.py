@@ -57,7 +57,7 @@ Example:
 Reference:
     Holland, J. H. (1992). Genetic Algorithms. Scientific American.
     Goldberg, D. E. (1989). Genetic Algorithms in Search, Optimization,
-        and Machine Learning.
+    and Machine Learning.
 """
 
 from __future__ import annotations

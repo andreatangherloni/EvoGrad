@@ -217,10 +217,11 @@ class ReflectRepair(Repair):
     feasible region. This preserves the "momentum" of the
     search and provides better gradient flow than clipping.
     
-    The reflection is computed as:
+    The reflection is computed as::
+
         x' = xl + |x - xl| mod (2 * range)
         if x' > xu: x' = 2*xu - x'
-    
+
     Args:
         max_iterations: Maximum reflection iterations (prevents
             infinite loops for extreme violations).

@@ -121,7 +121,7 @@ def minimize(
        
     2. algorithm.differentiable=False, operators.differentiable=True
        → Classical EA dynamics, but learn operator hyperparameters
-         (e.g., crossover eta, mutation rate, PSO w/c1/c2)
+       (e.g., crossover eta, mutation rate, PSO w/c1/c2)
          
     3. algorithm.differentiable=True, operators.differentiable=False
        → Gradient-based population updates (local search), fixed operators

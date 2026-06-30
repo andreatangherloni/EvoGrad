@@ -667,8 +667,9 @@ class ExponentialCrossover(Crossover):
     
     Per-Individual/Per-Gene Parameters:
         The forward() method accepts optional overrides:
+
         - cr: Crossover rate [scalar or N] (per-gene not supported
-              for exponential due to contiguous segment nature)
+          for exponential due to contiguous segment nature)
     
     Example:
         >>> crossover = ExponentialCrossover(cr=0.9)

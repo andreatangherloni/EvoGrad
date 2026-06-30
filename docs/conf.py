@@ -35,8 +35,12 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 napoleon_google_docstring = True
-napoleon_numpy_docstring = False
+napoleon_numpy_docstring = True   # a few docstrings (e.g. utils.device) use NumPy style
 napoleon_include_init_with_doc = False
+# Render "Attributes:" sections as :ivar: fields on the class instead of separate
+# object descriptions, so they don't collide with autodoc'd @property members
+# (removes the "duplicate object description" warnings).
+napoleon_use_ivar = True
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
