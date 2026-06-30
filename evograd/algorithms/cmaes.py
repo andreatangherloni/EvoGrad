@@ -83,6 +83,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from evograd.core.algorithm import Algorithm
+from evograd.operators.relaxations import standard_normal, log_param
 
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
@@ -386,9 +387,7 @@ class CMAES(Algorithm):
                 with torch.no_grad():
                     self._log_sigma.fill_(math.log(sigma_val))
             else:
-                self._log_sigma = nn.Parameter(
-                    torch.tensor(sigma_val, device=self.device, dtype=self.dtype).log()
-                )
+                self._log_sigma = log_param(sigma_val, device=self.device, dtype=self.dtype)
         else:
             if hasattr(self, '_sigma_buffer'):
                 self._sigma_buffer.fill_(sigma_val)
@@ -467,9 +466,7 @@ class CMAES(Algorithm):
                     self._to_logit(cmu).to(device=self.device, dtype=self.dtype)
                 )
                 # damps is positive, store as log
-                self._log_damps = nn.Parameter(
-                    torch.tensor(damps, device=self.device, dtype=self.dtype).log()
-                )
+                self._log_damps = log_param(damps, device=self.device, dtype=self.dtype)
         else:
             if not hasattr(self, '_cc'):
                 self.register_buffer("_cc", torch.tensor(cc, device=self.device, dtype=self.dtype))
@@ -587,7 +584,7 @@ class CMAES(Algorithm):
         N, D = self.pop_size, self.n_var
         
         # Sample standard normal
-        z = torch.randn(N, D, device=self.device, dtype=self.dtype)
+        z = standard_normal(N, D, device=self.device, dtype=self.dtype)
         
         # Transform: y = L @ z
         L = self.L

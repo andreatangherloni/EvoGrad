@@ -26,54 +26,17 @@ from torch import Tensor
 from ..base import BenchmarkFunction
 from . import basic
 from . import data as cec_data
+from ._base import CEC2017Base
 
 
-class CEC2017Function(BenchmarkFunction):
-    """Base class for CEC 2017 functions with shift and rotation support."""
-    
-    def __init__(
-        self,
-        func_num: int,
-        n_var: int = 10,
-        rotation: Optional[Tensor] = None,
-        shift: Optional[Tensor] = None,
-        seed: Optional[int] = None,
-    ):
-        """
-        Initialize CEC 2017 function.
-        
-        Args:
-            func_num: Function number (1-30).
-            n_var: Number of variables (2, 10, 20, 30, 50, or 100 for official data).
-            rotation: Optional rotation matrix. If None, loads from data or generates.
-            shift: Optional shift vector. If None, loads from data or generates.
-            seed: Random seed for generating transforms if not provided.
-        """
-        super().__init__(n_var=n_var, xl=-100.0, xu=100.0)
-        
-        self.func_num = func_num
-        self.bias = func_num * 100.0  # F_i* = i * 100
-        
-        # Load or generate rotation matrix
-        if rotation is not None:
-            self.rotation = rotation
-        else:
-            self.rotation = cec_data.get_rotation(func_num, n_var, seed=seed)
-        
-        # Load or generate shift vector
-        if shift is not None:
-            self.shift = shift
-        else:
-            self.shift = cec_data.get_shift(func_num, n_var, seed=seed)
-    
-    def default_bounds(self) -> Tuple[float, float]:
-        return (-100.0, 100.0)
-    
-    def _shift_rotate(self, x: Tensor) -> Tensor:
-        """Apply shift and rotation transformation."""
-        shift = self.shift.to(x.device, x.dtype)
-        rotation = self.rotation.to(x.device, x.dtype)
-        return cec_data.shift_rotate(x, shift, rotation)
+class CEC2017Function(CEC2017Base):
+    """Base class for CEC 2017 simple functions (shift + rotation).
+
+    The shared __init__, default_bounds, and _shift_rotate live in
+    CEC2017Base (see _base.py).
+    """
+
+    pass
 
 
 class CEC2017_F1(CEC2017Function):

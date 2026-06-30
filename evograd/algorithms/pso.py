@@ -52,6 +52,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from evograd.core.algorithm import Algorithm
+from evograd.operators.repair import clamp_to_bounds
 
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
@@ -357,7 +358,7 @@ class PSO(Algorithm):
         pos_repaired = torch.where(above, 2 * self.xu - position, pos_repaired)
         
         # Clamp to ensure within bounds (in case of large violations)
-        pos_repaired = torch.clamp(pos_repaired, self.xl, self.xu)
+        pos_repaired = clamp_to_bounds(pos_repaired, self.xl, self.xu)
         
         # Reverse velocity at boundaries
         vel_repaired = velocity.clone()
@@ -473,7 +474,7 @@ class PSO(Algorithm):
                 old_pos = new_pos - new_velocity          # P₀
                 grad_delta = self._population.data - old_pos  # −lr·∇
                 combined = new_pos + grad_delta           # P₀ + v − lr·∇
-                combined = torch.clamp(combined, self.xl, self.xu)
+                combined = clamp_to_bounds(combined, self.xl, self.xu)
                 self._population.copy_(combined)
             else:
                 self._population.copy_(new_pos)

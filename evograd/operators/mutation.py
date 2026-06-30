@@ -67,7 +67,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from evograd.operators.relaxations import binary_concrete, expand_param
+from evograd.operators.relaxations import binary_concrete, expand_param, standard_normal, log_param
 
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
@@ -136,9 +136,7 @@ class Mutation(nn.Module, ABC):
         
         # Temperature parameter (log for positivity)
         if learn_temperature and adaptive:
-            self._log_temperature = nn.Parameter(
-                torch.tensor(temperature).log()
-            )
+            self._log_temperature = log_param(temperature)
         else:
             self.register_buffer(
                 "_log_temperature",
@@ -366,7 +364,7 @@ class PolynomialMutation(Mutation):
         
         # Eta parameter (log for positivity)
         if learn_eta and adaptive:
-            self._log_eta = nn.Parameter(torch.tensor(eta).log())
+            self._log_eta = log_param(eta)
         else:
             self.register_buffer("_log_eta", torch.tensor(eta).log())
     
@@ -523,7 +521,7 @@ class GaussianMutation(Mutation):
         # Sigma parameter (log for positivity)
         sigma_val = sigma if sigma is not None else sigma_frac
         if learn_sigma and adaptive:
-            self._log_sigma = nn.Parameter(torch.tensor(sigma_val).log())
+            self._log_sigma = log_param(sigma_val)
         else:
             self.register_buffer("_log_sigma", torch.tensor(sigma_val).log())
     
@@ -593,7 +591,7 @@ class GaussianMutation(Mutation):
                 sigma_expanded = expand_param(None, self.sigma, n_pop, n_var, device, dtype)
         
         # Gaussian noise (reparameterised)
-        noise = torch.randn(n_pop, n_var, device=device, dtype=dtype) * sigma_expanded
+        noise = standard_normal(n_pop, n_var, device=device, dtype=dtype) * sigma_expanded
         
         # Apply mutation with mask
         y = x + mask * noise
@@ -779,7 +777,7 @@ class NonUniformMutation(Mutation):
         
         # B parameter (log for positivity)
         if learn_b and adaptive:
-            self._log_b = nn.Parameter(torch.tensor(b).log())
+            self._log_b = log_param(b)
         else:
             self.register_buffer("_log_b", torch.tensor(b).log())
     

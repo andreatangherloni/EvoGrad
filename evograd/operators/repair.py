@@ -50,7 +50,17 @@ __all__ = [
     "BoundsRepair",
     "RepairMethod",
     "NoRepair",
+    "clamp_to_bounds",
 ]
+
+
+def clamp_to_bounds(x: Tensor, xl: Tensor, xu: Tensor) -> Tensor:
+    """Clamp ``x`` element-wise to the box ``[xl, xu]``.
+
+    Single source of truth for box-bounds clamping: reused by ClipRepair and by
+    the algorithms (PSO/DE) instead of repeating ``torch.clamp`` inline.
+    """
+    return torch.clamp(x, min=xl, max=xu)
 
 
 class RepairMethod(Enum):
@@ -189,7 +199,7 @@ class ClipRepair(Repair):
         xl: Tensor,
         xu: Tensor,
     ) -> Tensor:
-        return torch.clamp(x, min=xl, max=xu)
+        return clamp_to_bounds(x, xl, xu)
     
     def __repr__(self) -> str:
         return "ClipRepair()"

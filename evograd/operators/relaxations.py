@@ -13,12 +13,14 @@ Functions:
 
 import torch
 from torch import Tensor
-from typing import Union
+from typing import Optional, Union
 
 __all__ = [
     "gumbel_softmax",
     "binary_concrete", 
     "expand_param",
+    "standard_normal",
+    "log_param",
 ]
 
 
@@ -173,3 +175,30 @@ def expand_param(
             )
     else:
         raise ValueError(f"param must be 0D, 1D, or 2D, got {val.dim()}D")
+
+
+def standard_normal(
+    *shape: int,
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+    generator: Optional[torch.Generator] = None,
+) -> Tensor:
+    """Draw standard-normal (pathwise / reparameterization) noise.
+
+    Single source for the ``torch.randn(..., device=, dtype=)`` reparameterization
+    draw, reused by CMA-ES sampling, Gaussian mutation, and the samplers.
+    """
+    return torch.randn(*shape, device=device, dtype=dtype, generator=generator)
+
+
+def log_param(
+    value: Union[float, Tensor],
+    device: Optional[torch.device] = None,
+    dtype: Optional[torch.dtype] = None,
+) -> "torch.nn.Parameter":
+    """Learnable positive hyperparameter stored on the log scale.
+
+    Single source for the repeated ``nn.Parameter(torch.tensor(v).log())`` idiom
+    used for sigma, F, eta, temperature, etc. Recover the value via ``.exp()``.
+    """
+    return torch.nn.Parameter(torch.tensor(value, device=device, dtype=dtype).log())

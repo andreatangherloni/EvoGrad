@@ -44,7 +44,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from evograd.operators.relaxations import gumbel_softmax
+from evograd.operators.relaxations import gumbel_softmax, log_param
 
 __all__ = [
     "Selection",
@@ -94,9 +94,7 @@ class Selection(nn.Module, ABC):
         # Temperature parameter
         if learn_temperature and adaptive:
             # Store as log for positivity
-            self._log_temperature = nn.Parameter(
-                torch.tensor(temperature).log()
-            )
+            self._log_temperature = log_param(temperature)
         else:
             self.register_buffer(
                 "_log_temperature",

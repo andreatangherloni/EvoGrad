@@ -65,6 +65,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from evograd.core.algorithm import Algorithm
+from evograd.operators.relaxations import standard_normal
 
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
@@ -197,7 +198,7 @@ class SHADEMemory:
         
         # Sample from Normal distribution
         sigma = 0.1  # Standard SHADE scale parameter
-        CR = mu_CR + sigma * torch.randn(n, device=device, dtype=dtype)
+        CR = mu_CR + sigma * standard_normal(n, device=device, dtype=dtype)
         
         # Truncate to [0, 1]
         CR = torch.clamp(CR, min=0.0, max=1.0)
@@ -520,7 +521,7 @@ class SHADE(Algorithm):
             
             # Reparameterized Normal for CR
             sigma = 0.1
-            eps = torch.randn(N, device=self.device, dtype=self.dtype)
+            eps = standard_normal(N, device=self.device, dtype=self.dtype)
             CR = mu_CR + sigma * eps
             CR = torch.clamp(CR, min=0.0, max=1.0)
         else:
@@ -886,8 +887,6 @@ class LSHADE(SHADE):
         adaptive: bool = False,
         differentiable: bool = False,
         selection_temperature: float = 1.0,
-        seed: Optional[int] = None,
-        device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.pop_size_init = pop_size_init  # Will be set in _setup if None
@@ -909,8 +908,6 @@ class LSHADE(SHADE):
             differentiable=differentiable,
             adaptive=adaptive,
             selection_temperature=selection_temperature,
-            seed=seed,
-            device=device,
             dtype=dtype,
         )
     
@@ -919,8 +916,10 @@ class LSHADE(SHADE):
         # Set default pop_size_init based on problem dimension
         if self.pop_size_init is None:
             self.pop_size_init = 18 * self.problem.n_var
-            self._pop_size = self.pop_size_init
-        
+        # Always initialise the working population size (fixes target_pop_size
+        # AttributeError when pop_size_init was provided explicitly).
+        self._pop_size = self.pop_size_init
+
         # Create success-history memory with L-SHADE archive size
         self.memory = SHADEMemory.create(
             H=self.memory_size,

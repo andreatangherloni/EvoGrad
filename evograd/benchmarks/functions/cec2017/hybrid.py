@@ -26,11 +26,15 @@ from torch import Tensor
 from ..base import BenchmarkFunction
 from . import basic
 from . import data as cec_data
+from ._base import CEC2017Base
 
 
-class CEC2017HybridFunction(BenchmarkFunction):
-    """Base class for CEC 2017 hybrid functions."""
-    
+class CEC2017HybridFunction(CEC2017Base):
+    """Base class for CEC 2017 hybrid functions (adds a shuffle permutation).
+
+    Shared shift/rotation handling is inherited from CEC2017Base (see _base.py).
+    """
+
     def __init__(
         self,
         func_num: int,
@@ -40,47 +44,13 @@ class CEC2017HybridFunction(BenchmarkFunction):
         shuffle: Optional[Tensor] = None,
         seed: Optional[int] = None,
     ):
-        """
-        Initialize CEC 2017 hybrid function.
-        
-        Args:
-            func_num: Function number (11-20).
-            n_var: Number of variables.
-            rotation: Optional rotation matrix.
-            shift: Optional shift vector.
-            shuffle: Optional shuffle permutation.
-            seed: Random seed for generating transforms if not provided.
-        """
-        super().__init__(n_var=n_var, xl=-100.0, xu=100.0)
-        
-        self.func_num = func_num
-        self.bias = func_num * 100.0
-        
-        # Load or generate transforms
-        if rotation is not None:
-            self.rotation = rotation
-        else:
-            self.rotation = cec_data.get_rotation(func_num, n_var, seed=seed)
-        
-        if shift is not None:
-            self.shift = shift
-        else:
-            self.shift = cec_data.get_shift(func_num, n_var, seed=seed)
-        
+        super().__init__(func_num=func_num, n_var=n_var,
+                         rotation=rotation, shift=shift, seed=seed)
         if shuffle is not None:
             self.shuffle = shuffle
         else:
             self.shuffle = cec_data.get_shuffle(func_num, n_var, seed=seed)
-    
-    def default_bounds(self) -> Tuple[float, float]:
-        return (-100.0, 100.0)
-    
-    def _shift_rotate(self, x: Tensor) -> Tensor:
-        """Apply shift and rotation transformation."""
-        shift = self.shift.to(x.device, x.dtype)
-        rotation = self.rotation.to(x.device, x.dtype)
-        return cec_data.shift_rotate(x, shift, rotation)
-    
+
     def _shuffle_and_partition(self, x: Tensor, partitions: List[float]) -> List[Tensor]:
         """Apply shuffle and partition."""
         shuffle = self.shuffle.to(x.device)

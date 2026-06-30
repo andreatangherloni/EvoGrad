@@ -71,7 +71,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from evograd.operators.relaxations import binary_concrete, expand_param
+from evograd.operators.relaxations import binary_concrete, expand_param, log_param
 
 __all__ = [
     "Crossover",
@@ -136,9 +136,7 @@ class Crossover(nn.Module, ABC):
         
         # Temperature parameter (log for positivity)
         if learn_temperature and adaptive:
-            self._log_temperature = nn.Parameter(
-                torch.tensor(temperature).log()
-            )
+            self._log_temperature = log_param(temperature)
         else:
             self.register_buffer(
                 "_log_temperature",
@@ -328,7 +326,7 @@ class SBXCrossover(Crossover):
         
         # Eta parameter (log for positivity)
         if learn_eta and adaptive:
-            self._log_eta = nn.Parameter(torch.tensor(eta).log())
+            self._log_eta = log_param(eta)
         else:
             self.register_buffer("_log_eta", torch.tensor(eta).log())
     

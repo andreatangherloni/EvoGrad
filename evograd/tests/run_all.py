@@ -18,6 +18,9 @@ from tests.test_core import run_all_tests as test_core
 from tests.test_operators import run_all_tests as test_operators
 from tests.test_cmaes import run_all_tests as test_cmaes
 from tests.test_ga import run_all_tests as test_ga
+from tests.test_de import run_all_tests as test_de
+from tests.test_pso import run_all_tests as test_pso
+from tests.test_shade import run_all_tests as test_shade
 from tests.test_per_individual import main as test_per_individual
 
 
@@ -60,6 +63,24 @@ def run_all():
     print("▶ RUNNING GA TESTS")
     print("▶"*60)
     results['ga'] = test_ga()
+
+    # Run DE tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING DE TESTS")
+    print("▶"*60)
+    results['de'] = test_de()
+
+    # Run PSO tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING PSO TESTS")
+    print("▶"*60)
+    results['pso'] = test_pso()
+
+    # Run SHADE tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING SHADE TESTS")
+    print("▶"*60)
+    results['shade'] = test_shade()
 
     # Run per-individual parameter tests
     print("\n\n" + "▶"*60)

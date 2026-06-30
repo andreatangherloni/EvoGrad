@@ -63,6 +63,8 @@ import torch.nn as nn
 from torch import Tensor
 
 from evograd.core.algorithm import Algorithm
+from evograd.operators.repair import clamp_to_bounds
+from evograd.operators.relaxations import log_param
 
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
@@ -308,9 +310,7 @@ class DE(Algorithm):
         # Setup F parameter
         if self.adaptive:
             # Learnable F stored as log(F) for positivity
-            self._log_F = nn.Parameter(
-                torch.tensor(self._init_F, device=self.device, dtype=self.dtype).log()
-            )
+            self._log_F = log_param(self._init_F, device=self.device, dtype=self.dtype)
         else:
             self.register_buffer(
                 "_F_buffer",
@@ -627,7 +627,7 @@ class DE(Algorithm):
             trial = self.repair(trial, self.xl, self.xu)
         else:
             # Default: clamp to bounds
-            trial = torch.clamp(trial, self.xl, self.xu)
+            trial = clamp_to_bounds(trial, self.xl, self.xu)
         
         return trial
     

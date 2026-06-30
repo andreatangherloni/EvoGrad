@@ -32,6 +32,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from evograd.operators.relaxations import standard_normal
+
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
 
@@ -335,16 +337,12 @@ class NormalSampling(Sampling):
         if generator is not None:
             # Generator may be on CPU for MPS devices
             gen_device = generator.device
-            z = torch.randn(
-                n_samples, n_var,
-                device=gen_device,
-                dtype=dtype,
-                generator=generator,
-            )
+            z = standard_normal(n_samples, n_var, device=gen_device, dtype=dtype,
+                                generator=generator)
             if gen_device != device:
                 z = z.to(device)
         else:
-            z = torch.randn(n_samples, n_var, device=device, dtype=dtype)
+            z = standard_normal(n_samples, n_var, device=device, dtype=dtype)
         
         # Transform to [0, 1] centered at 0.5 with scaled std
         # mean=0.5, std=sigma_factor * 0.5
