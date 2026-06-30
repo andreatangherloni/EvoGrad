@@ -1,0 +1,4 @@
+# Documentation build dependencies (used by Read the Docs and local builds).
+sphinx>=8.0
+furo>=2024.8.6
+myst-parser>=4.0
