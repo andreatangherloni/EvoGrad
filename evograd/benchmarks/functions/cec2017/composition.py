@@ -93,34 +93,33 @@ class CEC2017CompositionFunction(BenchmarkFunction):
         nx = x.shape[-1]
         n = self.n_components
         
-        weights = torch.zeros(*batch_shape, n, device=x.device, dtype=x.dtype)
-        
+        distances = []
         for i in range(n):
             shift = self.shifts[i].to(x.device, x.dtype)
             x_shifted = x - shift
-            
-            # Squared distance
-            w = (x_shifted ** 2).sum(dim=-1)
-            
-            # Non-zero mask
-            nz_mask = w != 0
-            
-            # Calculate weight: (1/sqrt(w)) * exp(-w / (2*nx*sigma^2))
-            sigma = sigmas[i]
-            weights[..., i] = torch.where(
-                nz_mask,
-                (1.0 / torch.sqrt(w + 1e-10)) * torch.exp(-w / (2.0 * nx * sigma * sigma)),
-                torch.tensor(float('inf'), device=x.device, dtype=x.dtype),
-            )
-        
-        # Normalize weights
-        w_sum = weights.sum(dim=-1, keepdim=True)
-        nz_sum_mask = w_sum != 0
-        weights = torch.where(
-            nz_sum_mask.expand_as(weights),
-            weights / (w_sum + 1e-10),
-            torch.full_like(weights, 1.0 / n),
+            distances.append((x_shifted ** 2).sum(dim=-1))
+
+        dist2 = torch.stack(distances, dim=-1)
+        zero_mask = dist2 == 0
+        zero_count = zero_mask.sum(dim=-1, keepdim=True)
+
+        sigma_shape = (1,) * len(batch_shape) + (n,)
+        sigma_values = sigmas.to(x.device, x.dtype).reshape(sigma_shape)
+        safe_dist2 = dist2.clamp_min(torch.finfo(x.dtype).tiny)
+        regular = safe_dist2.rsqrt() * torch.exp(
+            -dist2 / (2.0 * nx * sigma_values.square())
         )
+        regular_sum = regular.sum(dim=-1, keepdim=True)
+        regular_weights = torch.where(
+            regular_sum > 0,
+            regular / regular_sum.clamp_min(torch.finfo(x.dtype).tiny),
+            torch.full_like(regular, 1.0 / n),
+        )
+
+        # At a component centre the official finite-INF convention assigns all
+        # mass to that component. Handle it directly to avoid inf / inf NaNs.
+        centre_weights = zero_mask.to(x.dtype) / zero_count.clamp_min(1).to(x.dtype)
+        weights = torch.where(zero_count > 0, centre_weights, regular_weights)
         
         return weights
     

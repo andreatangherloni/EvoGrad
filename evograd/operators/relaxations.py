@@ -125,6 +125,7 @@ def expand_param(
             - scalar: Same value for all [N, D]
             - [D]: Per-gene, broadcast to [N, D]
             - [N]: Per-individual, broadcast to [N, D]
+              (when N == D, use [1, D] or [N, 1] to disambiguate)
             - [N, D]: Use as-is
         default: Default value if param is None.
         n_pop: Number of individuals (N).
@@ -154,6 +155,12 @@ def expand_param(
         # Scalar -> [N, D]
         return val.expand(n_pop, n_var)
     elif val.dim() == 1:
+        if val.shape[0] == n_var and val.shape[0] == n_pop and param is not None:
+            raise ValueError(
+                "Ambiguous 1D parameter because n_pop == n_var. Pass an "
+                "[N, 1] tensor for per-individual values or [1, D] for "
+                "per-gene values."
+            )
         if val.shape[0] == n_var:
             # [D] -> [N, D] (per-gene)
             return val.unsqueeze(0).expand(n_pop, -1)
@@ -168,9 +175,14 @@ def expand_param(
     elif val.dim() == 2:
         if val.shape == (n_pop, n_var):
             return val
+        elif val.shape == (n_pop, 1):
+            return val.expand(-1, n_var)
+        elif val.shape == (1, n_var):
+            return val.expand(n_pop, -1)
         else:
             raise ValueError(
-                f"2D param must have shape [{n_pop}, {n_var}], "
+                f"2D param must have shape [{n_pop}, {n_var}], [{n_pop}, 1], "
+                f"or [1, {n_var}], "
                 f"got {list(val.shape)}"
             )
     else:

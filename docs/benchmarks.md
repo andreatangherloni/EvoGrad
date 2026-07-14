@@ -21,6 +21,9 @@ y = f(torch.randn(100, 30))              # batch evaluation -> shape [100]
 ## Running
 
 ```bash
+# Install the manuscript's pinned cross-library baseline
+pip install -r requirements-benchmarks.txt
+
 # 30 runs of DE on the full CEC 2017 suite in 30D (vs pymoo + Adam baselines)
 python -m evograd.benchmarks.run_benchmark_functions -a DE -s cec2017 -D 30 -r 30
 

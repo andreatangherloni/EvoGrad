@@ -22,6 +22,7 @@ from tests.test_de import run_all_tests as test_de
 from tests.test_pso import run_all_tests as test_pso
 from tests.test_shade import run_all_tests as test_shade
 from tests.test_per_individual import main as test_per_individual
+from tests.test_regressions import run_all_tests as test_regressions
 
 
 def run_all():
@@ -87,6 +88,12 @@ def run_all():
     print("▶ RUNNING PER-INDIVIDUAL TESTS")
     print("▶"*60)
     results['per_individual'] = test_per_individual()
+
+    # Run audit regression tests
+    print("\n\n" + "▶"*60)
+    print("▶ RUNNING AUDIT REGRESSION TESTS")
+    print("▶"*60)
+    results['regressions'] = test_regressions()
 
     # Summary
     print("\n\n" + "█"*60)

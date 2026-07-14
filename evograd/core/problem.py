@@ -91,6 +91,8 @@ class Problem(nn.Module):
         constraints: List of constraint tuples: (func, type).
             - func: Callable (N, n_var) -> (N,) or (N, n_constraints)
             - type: 'ineq' for g(x) <= 0, 'eq' for h(x) = 0
+        constraint_penalty: Positive exterior-penalty multiplier applied by
+            optimizers to total constraint violation. Default: 1e6.
         n_obj: Number of objectives (default: 1, multi-objective planned).
         name: Optional problem name for identification.
         device: Computation device (default: auto-detect).
@@ -152,6 +154,7 @@ class Problem(nn.Module):
         name: Optional[str] = None,
         device: Optional[Union[str, torch.device]] = None,
         dtype: torch.dtype = torch.float32,
+        constraint_penalty: float = 1e6,
     ) -> None:
         super().__init__()
         
@@ -178,6 +181,9 @@ class Problem(nn.Module):
         self.name = name or self.__class__.__name__
         self.device = get_device(device)
         self.dtype = dtype
+        if constraint_penalty <= 0:
+            raise ValueError("constraint_penalty must be > 0")
+        self.constraint_penalty = float(constraint_penalty)
         
         # Process and register bounds
         xl_tensor, xu_tensor = self._process_bounds(xl, xu, n_var)

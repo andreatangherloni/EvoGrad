@@ -18,7 +18,7 @@ the dependency injection pattern for operators.
 
 Example:
     >>> from evograd.algorithms import GA, DE, SHADE, PSO, CMAES
-    >>> from evograd.core import Problem, minimize
+    >>> from evograd.core import Problem, minimize, MaxEvaluations
     >>> 
     >>> problem = Problem(
     ...     objective=lambda x: (x**2).sum(dim=-1),
@@ -29,27 +29,27 @@ Example:
     >>> 
     >>> # Genetic Algorithm
     >>> ga = GA(pop_size=100, differentiable=True)
-    >>> result = minimize(problem, ga, max_evals=10000)
+    >>> result = minimize(problem, ga, MaxEvaluations(10000), lr_pop=-1, lr_hyper=-1)
     >>> 
     >>> # Differential Evolution
     >>> de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
-    >>> result = minimize(problem, de, max_evals=10000)
+    >>> result = minimize(problem, de, MaxEvaluations(10000), lr_hyper=-1)
     >>> 
     >>> # SHADE (Self-Adaptive DE)
     >>> shade = SHADE(pop_size=100, memory_size=100)
-    >>> result = minimize(problem, shade, max_evals=10000)
+    >>> result = minimize(problem, shade, MaxEvaluations(10000))
     >>> 
     >>> # L-SHADE (SHADE with population reduction)
     >>> lshade = LSHADE(pop_size_init=18*30, pop_size_min=4)
-    >>> result = minimize(problem, lshade, max_evals=10000)
+    >>> result = minimize(problem, lshade, MaxEvaluations(10000))
     >>> 
     >>> # Particle Swarm Optimisation
     >>> pso = PSO(pop_size=100, adaptive=True)
-    >>> result = minimize(problem, pso, max_evals=10000)
+    >>> result = minimize(problem, pso, MaxEvaluations(10000), lr_hyper=-1)
     >>> 
     >>> # CMA-ES
     >>> cmaes = CMAES(pop_size=50, adaptive=True)
-    >>> result = minimize(problem, cmaes, max_evals=10000)
+    >>> result = minimize(problem, cmaes, MaxEvaluations(10000), lr_hyper=-1)
 """
 
 # Genetic Algorithm

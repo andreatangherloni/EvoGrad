@@ -49,7 +49,8 @@ class Result:
         best_fitness: Best fitness value (scalar).
         population: Final population (shape: [pop_size, n_var]).
         fitness: Final fitness values (shape: [pop_size]).
-        n_evals: Total number of fitness evaluations.
+        n_evals: Counted initial/offspring fitness evaluations. Live parent
+            graph-reconstruction passes are excluded by convention.
         n_gen: Total number of generations.
         success: Whether optimisation succeeded (target reached, etc.).
         termination_reason: Why optimisation stopped.

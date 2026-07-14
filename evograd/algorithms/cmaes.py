@@ -234,6 +234,7 @@ class CMAES(Algorithm):
         repair: Optional[nn.Module] = None,
         adaptive: bool = False,
         differentiable: bool = False,
+        selection_temperature: float = 1.0,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         self.adaptive = adaptive
@@ -244,6 +245,9 @@ class CMAES(Algorithm):
         self._init_c1 = c1
         self._init_cmu = cmu
         self._init_damps = damps
+        if selection_temperature <= 0:
+            raise ValueError("selection_temperature must be > 0")
+        self._init_selection_temperature = selection_temperature
         
         # Restart parameters
         self._restarts = restarts
@@ -287,7 +291,9 @@ class CMAES(Algorithm):
         # Compute default population size if not provided
         if self._requested_pop_size is None:
             n_var = self.problem.n_var
-            self.pop_size = 4 + int(3 * math.log(n_var))
+            default_size = 4 + int(3 * math.log(n_var))
+            factor = float(getattr(self, "_pop_size_factor", 1.0))
+            self.pop_size = max(2, int(round(default_size * factor)))
             self.n_offsprings = self.pop_size
 
     def _setup(self) -> None:
@@ -303,6 +309,16 @@ class CMAES(Algorithm):
         
         # Compute recombination weights
         self._setup_weights()
+
+        log_temperature = torch.tensor(
+            math.log(self._init_selection_temperature),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        if self.adaptive:
+            self._log_selection_temperature = nn.Parameter(log_temperature)
+        else:
+            self.register_buffer("_log_selection_temperature", log_temperature)
         
         # Setup mean
         self._setup_mean(n_var)
@@ -517,6 +533,37 @@ class CMAES(Algorithm):
         """Covariance matrix C = L @ L.T."""
         L = self.L
         return L @ L.T
+
+    @property
+    def selection_temperature(self) -> Tensor:
+        """Temperature used by differentiable fitness recombination."""
+        return self._log_selection_temperature.exp()
+
+    def _soft_recombination_weights(self, fitness: Tensor) -> Tensor:
+        """Scale-invariant temperature-controlled fitness weights."""
+        spread = fitness.detach().std(unbiased=False).clamp_min(
+            torch.finfo(fitness.dtype).tiny
+        )
+        temperature = self.selection_temperature * spread
+        # Center first so a constant, non-zero fitness vector does not overflow
+        # when its (correctly tiny) scale is used as the temperature.
+        centered = fitness - fitness.detach().mean()
+        return torch.softmax(-centered / temperature, dim=0)
+
+    def _coefficients_for_mass(self, mu_eff: Tensor, soft: bool) -> tuple:
+        """Return CMA adaptation coefficients consistent with selection mass."""
+        if not soft or self.adaptive:
+            return self.cc, self.cs, self.c1, self.cmu, self.damps
+
+        d = float(self.n_var)
+        m = float(mu_eff.detach())
+        cc = (4 + m / d) / (d + 4 + 2 * m / d)
+        cs = (m + 2) / (d + m + 5)
+        c1 = 2 / ((d + 1.3) ** 2 + m)
+        cmu = max(0.0, min(1 - c1, 2 * (m - 2 + 1 / m) / ((d + 2) ** 2 + m)))
+        damps = 1 + 2 * max(0, math.sqrt((m - 1) / (d + 1)) - 1) + cs
+        values = (cc, cs, c1, cmu, damps)
+        return tuple(torch.as_tensor(v, device=self.device, dtype=self.dtype) for v in values)
     
     @property
     def p_sigma(self) -> Tensor:
@@ -616,6 +663,20 @@ class CMAES(Algorithm):
             offspring = torch.clamp(offspring, self.xl, self.xu)
         
         return offspring
+
+    def forward(self, reduction: str = "mean", live_selection: bool = True) -> Tensor:
+        """Build a generation graph with soft fitness recombination.
+
+        Classical CMA-ES keeps the requested generic reduction. Differentiable
+        and adaptive variants use temperature-controlled softmax weights so
+        selection itself contributes gradients, matching the manuscript model.
+        """
+        loss = super().forward(reduction=reduction, live_selection=live_selection)
+        if not (self.differentiable or self.adaptive):
+            return loss
+        fitness = self._pending_fitness
+        weights = self._soft_recombination_weights(fitness)
+        return (weights * fitness).sum()
     
     def _advance(self, offspring: Tensor, offspring_fitness: Tensor) -> None:
         """
@@ -625,30 +686,52 @@ class CMAES(Algorithm):
             offspring: Offspring population [pop_size, n_var].
             offspring_fitness: Fitness values [pop_size].
         """
-        N, D = self.pop_size, self.n_var
-        mu = self._mu
-        
-        # Sort by fitness (ascending for minimization)
-        sorted_indices = torch.argsort(offspring_fitness)
-        selected_indices = sorted_indices[:mu]
-        
-        # Get selected y vectors (in transformed space)
-        y_selected = self._pending_y[selected_indices]  # [mu, D]
-        
+        if self.differentiable or self.adaptive:
+            recombination_weights = self._soft_recombination_weights(offspring_fitness)
+            y_selected = self._pending_y
+            soft_recombination = True
+        else:
+            sorted_indices = torch.argsort(offspring_fitness)
+            selected_indices = sorted_indices[:self._mu]
+            y_selected = self._pending_y[selected_indices]
+            recombination_weights = self._weights
+            soft_recombination = False
+
+        mu_eff = 1.0 / recombination_weights.square().sum().clamp_min(self._eps)
+        cc, cs, c1, cmu, damps = self._coefficients_for_mass(
+            mu_eff,
+            soft_recombination,
+        )
+        self._last_mu_eff = float(mu_eff.detach())
+
         # Weighted recombination in y-space
-        y_w = (self._weights.unsqueeze(-1) * y_selected).sum(dim=0)  # [D]
+        y_w = (recombination_weights.unsqueeze(-1) * y_selected).sum(dim=0)
         
         # Update mean
         new_mean = self.mean + self.sigma * y_w
         
         # Update evolution paths
-        new_p_sigma, new_p_c, h_sigma = self._update_evolution_paths(y_w)
+        new_p_sigma, new_p_c, h_sigma = self._update_evolution_paths(
+            y_w,
+            mu_eff,
+            cc,
+            cs,
+            soft_recombination,
+        )
         
         # Update covariance
-        new_L = self._update_covariance(y_selected, new_p_c, h_sigma)
+        new_L = self._update_covariance(
+            y_selected,
+            new_p_c,
+            h_sigma,
+            recombination_weights,
+            cc,
+            c1,
+            cmu,
+        )
         
         # Update step-size
-        new_sigma = self._update_sigma(new_p_sigma)
+        new_sigma = self._update_sigma(new_p_sigma, cs, damps)
         
         # Commit updates
         self._commit_updates(
@@ -682,7 +765,14 @@ class CMAES(Algorithm):
         del self._pending_z
         del self._pending_y
     
-    def _update_evolution_paths(self, y_w: Tensor) -> tuple:
+    def _update_evolution_paths(
+        self,
+        y_w: Tensor,
+        mu_eff: Tensor,
+        cc: Tensor,
+        cs: Tensor,
+        soft: bool,
+    ) -> tuple:
         """
         Update evolution paths p_σ and p_c.
         
@@ -693,7 +783,6 @@ class CMAES(Algorithm):
             Tuple of (new_p_sigma, new_p_c, h_sigma).
         """
         D = self.n_var
-        mu_eff = self._mu_eff
         
         # Compute C^(-1/2) @ y_w using L^(-1) @ y_w
         L = self.L
@@ -701,8 +790,15 @@ class CMAES(Algorithm):
         z_w = torch.linalg.solve_triangular(L, y_w.unsqueeze(-1), upper=False).squeeze(-1)
         
         # Update p_sigma (conjugate evolution path)
-        cs = self.cs
-        new_p_sigma = (1 - cs) * self.p_sigma + math.sqrt(cs * (2 - cs) * mu_eff) * z_w
+        if soft:
+            sigma_path_scale = torch.sqrt(cs * (2 - cs) * mu_eff)
+            covariance_path_scale = torch.sqrt(cc * (2 - cc) * mu_eff)
+        else:
+            # Preserve the original classical implementation's scalar path
+            # exactly; only relaxed recombination needs tensor-valued scales.
+            sigma_path_scale = math.sqrt(cs * (2 - cs) * mu_eff)
+            covariance_path_scale = math.sqrt(cc * (2 - cc) * mu_eff)
+        new_p_sigma = (1 - cs) * self.p_sigma + sigma_path_scale * z_w
         
         # Heaviside function h_sigma (smooth approximation)
         norm_p_sigma = new_p_sigma.norm()
@@ -710,8 +806,7 @@ class CMAES(Algorithm):
         h_sigma = torch.sigmoid(10 * (threshold - norm_p_sigma / self._chi_n))
         
         # Update p_c (evolution path for covariance)
-        cc = self.cc
-        new_p_c = (1 - cc) * self.p_c + h_sigma * math.sqrt(cc * (2 - cc) * mu_eff) * y_w
+        new_p_c = (1 - cc) * self.p_c + h_sigma * covariance_path_scale * y_w
         
         return new_p_sigma, new_p_c, h_sigma
     
@@ -720,6 +815,10 @@ class CMAES(Algorithm):
         y_selected: Tensor,
         new_p_c: Tensor,
         h_sigma: Tensor,
+        recombination_weights: Tensor,
+        cc: Tensor,
+        c1: Tensor,
+        cmu: Tensor,
     ) -> Tensor:
         """
         Update covariance matrix C.
@@ -733,9 +832,6 @@ class CMAES(Algorithm):
             New Cholesky factor L.
         """
         D = self.n_var
-        c1 = self.c1
-        cmu = self.cmu
-        cc = self.cc
         
         # Current covariance
         L = self.L
@@ -746,7 +842,7 @@ class CMAES(Algorithm):
         
         # Rank-mu update
         rank_mu = (
-            self._weights.unsqueeze(-1).unsqueeze(-1) * 
+            recombination_weights.unsqueeze(-1).unsqueeze(-1) *
             y_selected.unsqueeze(-1) * y_selected.unsqueeze(-2)
         ).sum(dim=0)
         
@@ -850,7 +946,12 @@ class CMAES(Algorithm):
         
         return L_identity
     
-    def _update_sigma(self, new_p_sigma: Tensor) -> Tensor:
+    def _update_sigma(
+        self,
+        new_p_sigma: Tensor,
+        cs: Tensor,
+        damps: Tensor,
+    ) -> Tensor:
         """
         Update step-size using CSA (Cumulative Step-size Adaptation).
         
@@ -860,9 +961,6 @@ class CMAES(Algorithm):
         Returns:
             New step-size.
         """
-        cs = self.cs
-        damps = self.damps
-        
         # Step-size update factor
         norm_p_sigma = new_p_sigma.norm()
         factor = torch.exp((cs / damps) * (norm_p_sigma / self._chi_n - 1))
@@ -1098,6 +1196,10 @@ class CMAES(Algorithm):
         if self.adaptive:
             # Sigma in (1e-10, 1e10)
             self._log_sigma.clamp_(min=-23, max=23)
+            self._log_selection_temperature.clamp_(
+                min=math.log(0.05),
+                max=math.log(100.0),
+            )
             
             # Ensure c1 + cmu <= 1
             c1 = torch.sigmoid(self._c1_logit)
@@ -1118,7 +1220,8 @@ class CMAES(Algorithm):
         return {
             'pop_size': self.pop_size,
             'mu': self._mu,
-            'mu_eff': self._mu_eff,
+            'selection_temperature': float(self.selection_temperature.detach()),
+            'mu_eff': getattr(self, '_last_mu_eff', self._mu_eff),
             'sigma': float(self.sigma.item()),
             'cc': float(self.cc.item()),
             'cs': float(self.cs.item()),

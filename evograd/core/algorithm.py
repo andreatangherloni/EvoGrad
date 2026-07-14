@@ -80,7 +80,8 @@ class AlgorithmState:
     
     Attributes:
         generation: Current generation number.
-        n_evals: Total fitness evaluations performed.
+        n_evals: Counted initial/offspring fitness evaluations. Auxiliary live
+            parent graph-reconstruction passes are deliberately excluded.
         population: Current population tensor.
         fitness: Current fitness values.
         best_fitness: Best fitness found so far.
@@ -469,6 +470,13 @@ class Algorithm(nn.Module, ABC):
             Fitness tensor of shape (N,).
         """
         fitness = self.problem.evaluate(x)
+
+        # Apply a differentiable exterior penalty for declared constraints.
+        # Previously constraints were exposed by Problem but silently ignored by
+        # every optimiser. Feasible points retain their raw objective value.
+        if self.problem.has_constraints():
+            violation = self.problem.evaluate_constraints(x)["cv"]
+            fitness = fitness + self.problem.constraint_penalty * violation
         
         # Ensure correct shape and type
         if fitness.dim() == 0:
@@ -480,6 +488,7 @@ class Algorithm(nn.Module, ABC):
     # Main Evolution Methods
     # =========================================================================
     
+    @torch.no_grad()
     def step(self) -> float:
         """
         Perform one generation of evolution (classical mode).
@@ -548,13 +557,12 @@ class Algorithm(nn.Module, ABC):
                 - True (default, "live"): re-evaluate the current population so
                   the selection logits depend on the live parameter — the
                   Gumbel-Softmax selection gradient then reaches the population
-                  (fully end-to-end differentiable generation). For a
-                  deterministic objective this re-evaluation reproduces the
-                  committed fitness values exactly, so it is graph
-                  reconstruction, not new sampling: it is intentionally NOT
-                  counted in the evaluation budget (n_evals). It is, however, a
-                  real extra objective pass (wall-clock/FLOPs). For a stochastic
-                  objective the values may differ from the committed fitness.
+                  (fully end-to-end differentiable generation). This is a real
+                  extra objective pass (wall-clock/FLOPs) that is intentionally
+                  excluded from the offspring-candidate budget (n_evals). A
+                  prior gradient step can mean these are newly moved coordinates,
+                  even for a deterministic objective. For stochastic objectives,
+                  use detached selection unless a fresh noisy pass is intended.
                 - False ("detached", memetic): selection uses the cached,
                   detached committed fitness as fixed routing weights; gradient
                   only refines positions. Cheaper (no extra pass), lower
@@ -577,12 +585,14 @@ class Algorithm(nn.Module, ABC):
                 f"reduction must be one of 'mean', 'sum', 'min'; got {reduction!r}"
             )
 
-        # Live selection: attach a fresh autograd graph to the parent fitness so
-        # selection gradients flow into the population. Deliberately does NOT
-        # increment n_evals (values match the committed fitness for a
-        # deterministic objective — this only rebuilds the graph).
+        # Live selection attaches a fresh autograd graph to parent fitness so
+        # selection gradients reach the population. This real auxiliary pass is
+        # deliberately excluded from the offspring-candidate n_evals budget.
         if live_selection:
             self.state.fitness = self._evaluate(self.population)
+            # Record the evaluated coordinates before the optimiser moves them.
+            # This keeps best_solution paired with the fitness that produced it.
+            self.state.update_best(self.population, self.state.fitness)
 
         # Generate offspring (differentiable)
         offspring = self._infill()
@@ -597,6 +607,7 @@ class Algorithm(nn.Module, ABC):
         # Evaluate offspring (differentiable if objective supports it)
         offspring_fitness = self._evaluate(offspring)
         self.state.n_evals += offspring.shape[0]
+        self.state.update_best(offspring, offspring_fitness)
         
         # Store for update_state() to commit later
         self._pending_offspring = offspring

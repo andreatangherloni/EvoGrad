@@ -200,7 +200,8 @@ class CEC2017_F8(CEC2017Function):
     Properties:
         - Multimodal
         - Non-separable
-        - Non-continuous
+        - Labeled non-continuous by CEC 2017; the official reference evaluates
+          the unrounded input, which this implementation intentionally matches
         - Optimal value: F8* = 800
     """
     name = "cec2017_f8"
@@ -230,6 +231,11 @@ class CEC2017_F9(CEC2017Function):
     
     def __init__(self, n_var: int = 10, **kwargs):
         super().__init__(func_num=9, n_var=n_var, **kwargs)
+        # Levy reaches its optimum at transformed z=1, not at z=0. Solve the
+        # stored CEC transform directly because its matrices are not guaranteed
+        # to be exactly orthogonal after serialization/scaling.
+        ones = torch.ones(n_var, dtype=self.shift.dtype, device=self.shift.device)
+        self._optimal_x = self.shift + torch.linalg.solve(self.rotation, ones)
     
     def __call__(self, x: Tensor) -> Tensor:
         z = self._shift_rotate(x)

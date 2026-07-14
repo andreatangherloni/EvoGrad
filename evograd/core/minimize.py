@@ -38,6 +38,7 @@ Example:
 from __future__ import annotations
 
 import time
+import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import torch
@@ -157,10 +158,14 @@ def minimize(
         # Differentiable mode options (used if learnable params exist):
         optimizer: PyTorch optimizer for gradient-based updates.
             If None, SGD is used with specified lr.
-        lr_pop: Learning rate for gradient-based updates of the population (default: 1e-2).
-        lr_hyper: Learning rate for gradient-based updates of the hyperparameters (default: 1e-3).
-        grad_clip_pop: Maximum gradient norm for clipping population gradient (None = no clipping).
-        grad_clip_hyper: Maximum gradient norm for clipping hyperparam gradient (None = no clipping).
+        lr_pop: Population learning rate. ``None`` or ``0`` preserves classical
+            behavior; ``-1`` explicitly selects the algorithm default.
+        lr_hyper: Hyperparameter learning rate. ``None`` or ``0`` disables
+            hyperparameter updates; ``-1`` selects the algorithm default.
+        grad_clip_pop: Population gradient clipping. ``-1`` selects the
+            algorithm default; ``None`` disables clipping.
+        grad_clip_hyper: Hyperparameter gradient clipping. ``-1`` selects the
+            algorithm default; ``None`` disables clipping.
         scheduler: Learning rate scheduler type:
             - 'plateau': Reduce on plateau (default)
             - 'step': Reduce every N generations
@@ -177,10 +182,11 @@ def minimize(
             active; ignored in classical mode.
         live_selection: If True (default), selection routing carries gradient
             to the population via a per-generation re-evaluation of the current
-            population (not counted in n_evals; deterministic objectives only —
-            see Algorithm.forward). If False, selection uses the cached,
-            detached fitness (memetic; cheaper; for stochastic objectives).
-            Only used when backprop is active.
+            population. This is a real auxiliary objective pass, possibly at
+            gradient-moved coordinates, but is excluded from the counted
+            offspring-candidate budget ``n_evals`` by convention. If False,
+            selection uses cached detached fitness (memetic; cheaper and exact
+            objective-call accounting). Only used when backprop is active.
 
     Returns:
         Result object containing:
@@ -188,7 +194,8 @@ def minimize(
             - best_fitness: Best fitness value
             - population: Final population
             - fitness: Final fitness values
-            - n_evals: Total evaluations
+            - n_evals: Counted initial/offspring evaluations (excluding live
+              parent graph-reconstruction passes)
             - n_gen: Total generations
             - history: Convergence history (if save_history=True)
             - success: Whether target was reached
@@ -205,11 +212,12 @@ def minimize(
         ...     mutation=PolynomialMutation(eta=20, differentiable=True),
         ...     differentiable=False,  # Population not updated via gradients
         ...     )
-        >>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000))
+        >>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000),
+        ...                   lr_hyper=-1)
         >>> 
         >>> # Full differentiable mode
         >>> algorithm = GA(pop_size=100, differentiable=True)
-        >>> result = minimize(problem, algorithm, lr=0.01, grad_clip_pop=1.0)
+        >>> result = minimize(problem, algorithm, lr_pop=-1, lr_hyper=-1)
         >>>
         >>> # Continue optimization with a different problem (e.g., surrogate -> true)
         >>> # First optimize with surrogate problem
@@ -242,6 +250,16 @@ def minimize(
     
     # Parse termination criteria
     termination = _parse_termination(termination)
+
+    # Configure population-reduction schedules from the same evaluation budget
+    # used by the optimisation loop. Callers may still override this explicitly.
+    max_evals = _find_max_evaluations(termination)
+    if (
+        max_evals is not None
+        and hasattr(algorithm, "set_max_evals")
+        and getattr(algorithm, "_max_evals", None) is None
+    ):
+        algorithm.set_max_evals(max_evals)
     
     # Setup callbacks
     callbacks = _setup_callbacks(callback, verbose, save_history)
@@ -341,6 +359,10 @@ def minimize(
                     total_generations=est_gens,
                 )
             )
+        # Explicitly disabling every learning rate should also disable the
+        # backward pass; otherwise gradients accumulate without any update.
+        if not optimizers:
+            use_backprop = False
     else:
         optimizers = []
         schedulers = []
@@ -421,6 +443,21 @@ def minimize(
     
     # Build result
     builder.finish(algorithm, termination, success)
+
+    if problem.has_constraints() and algorithm.best_solution is not None:
+        feasible = bool(problem.is_feasible(algorithm.best_solution))
+        builder.add_extra("best_feasible", feasible)
+        builder.add_extra(
+            "best_constraint_violation",
+            float(problem.evaluate_constraints(algorithm.best_solution)["cv"]),
+        )
+        if not feasible:
+            warnings.warn(
+                "The returned best solution is infeasible under the declared "
+                "constraints; increase Problem.constraint_penalty.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     
     # Get history from callbacks
     if save_history:
@@ -459,7 +496,7 @@ def _resolve_opt_defaults(
     alg_name = algorithm.__class__.__name__
     defaults = _OPT_DEFAULTS.get(alg_name, _OPT_DEFAULTS["GA"])
 
-    # -1 means "use defaults", None means "disable" (for clips)
+    # -1 means "use defaults"; None explicitly disables that optimizer/clip.
     if lr_pop == -1:
         lr_pop = defaults["lr_pop"]
     if lr_hyper == -1:
@@ -498,6 +535,20 @@ def _parse_termination(termination: Optional[Termination]) -> Termination:
         f"Got {type(termination).__name__}. "
         f"Example: termination=MaxEvaluations(10000)"
     )
+
+
+def _find_max_evaluations(termination: Termination) -> Optional[int]:
+    """Extract the first MaxEvaluations budget from a termination tree."""
+    from evograd.core.termination import MaxEvaluations, TerminationCollection
+
+    if isinstance(termination, MaxEvaluations):
+        return termination.max_evals
+    if isinstance(termination, TerminationCollection):
+        for criterion in termination.criteria:
+            value = _find_max_evaluations(criterion)
+            if value is not None:
+                return value
+    return None
 
 
 def _update_termination_budget(
@@ -581,7 +632,7 @@ def _collect_history(callbacks: List[Callback]) -> Dict[str, List[Any]]:
 
 
 def _check_target_reached(termination: Termination, algorithm: Algorithm) -> bool:
-    """Check if target was reached (for TargetReached termination)."""
+    """Recursively check whether any target criterion was reached."""
     if isinstance(termination, TargetReached):
         best = algorithm.best_fitness
         if termination.minimize:
@@ -590,15 +641,10 @@ def _check_target_reached(termination: Termination, algorithm: Algorithm) -> boo
             return best >= termination.target_fitness
     
     if isinstance(termination, TerminationCollection):
-        for criterion in termination.criteria:
-            if isinstance(criterion, TargetReached):
-                best = algorithm.best_fitness
-                if criterion.minimize:
-                    if best <= criterion.target_fitness:
-                        return True
-                else:
-                    if best >= criterion.target_fitness:
-                        return True
+        return any(
+            _check_target_reached(criterion, algorithm)
+            for criterion in termination.criteria
+        )
     
     return False
 
@@ -720,7 +766,11 @@ def _step_differentiable(
     if algorithm.differentiable and isinstance(algorithm.population, torch.nn.Parameter):
         algorithm.population.requires_grad_(True)
     
-    # Zero gradients
+    # Clear every algorithm gradient, including intentionally non-optimised
+    # parameter groups, so partial optimisation cannot accumulate stale grads.
+    algorithm.zero_grad(set_to_none=True)
+
+    # Zero optimizer-owned gradients as well (supports external parameters).
     for opt in optimizers:
         opt.zero_grad(set_to_none=True)
     
@@ -742,7 +792,23 @@ def _step_differentiable(
         opt.step()
     
     # Commit evolutionary changes
+    old_population_param = algorithm.population if isinstance(algorithm.population, torch.nn.Parameter) else None
     algorithm.update_state()
+
+    # Population-size-changing algorithms (notably differentiable L-SHADE)
+    # may replace their Parameter. Keep existing optimisers attached to the
+    # live population for the next generation.
+    new_population_param = algorithm.population if isinstance(algorithm.population, torch.nn.Parameter) else None
+    if old_population_param is not None and new_population_param is not old_population_param:
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["params"] = [
+                    new_population_param if p is old_population_param else p
+                    for p in group["params"]
+                ]
+            opt.state.pop(old_population_param, None)
+        if pop_params is not None:
+            pop_params[:] = [new_population_param]
     
     # Scheduler step
     for sch in schedulers:

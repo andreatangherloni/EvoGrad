@@ -72,8 +72,9 @@ def expanded_schaffers_f6(x: Tensor) -> Tensor:
     Expanded Schaffer's F6 function.
     f(x) = sum(0.5 + (sin^2(sqrt(x_i^2 + x_{i+1}^2)) - 0.5) / (1 + 0.001*(x_i^2 + x_{i+1}^2))^2)
     """
-    x_i = x[..., :-1]
-    x_ip1 = x[..., 1:]
+    # The expanded CEC definition is cyclic and includes g(x_D, x_1).
+    x_i = x
+    x_ip1 = torch.roll(x, shifts=-1, dims=-1)
     t = x_i ** 2 + x_ip1 ** 2
     sin_term = torch.sin(torch.sqrt(t)) ** 2 - 0.5
     denom = (1 + 0.001 * t) ** 2
@@ -142,8 +143,11 @@ def non_cont_rastrigin(
     rotation: Optional[Tensor] = None,
 ) -> Tensor:
     """
-    Non-Continuous Rastrigin function.
-    A special case that requires shift and rotation to be passed directly.
+    CEC 2017 F8 compatibility implementation.
+
+    The official C reference computes the rounded buffer but evaluates the
+    unrounded shifted input. We preserve that behavior for golden-value
+    compatibility even though the resulting landscape is continuous.
     """
     nx = x.shape[-1]
     
@@ -165,7 +169,7 @@ def non_cont_rastrigin(
         x_mod
     )
     
-    # Scale
+    # Scale the unrounded input to match the official CEC 2017 implementation.
     z = 0.0512 * shifted
     
     # Apply rotation if provided

@@ -373,7 +373,7 @@ def create_evograd_algorithm(algorithm_name: str, config: str, pop_size: int, de
 
 
 def create_pymoo_algorithm(algorithm_name: str, pop_size: int):
-    """Create pymoo algorithm for baseline comparison."""
+    """Create a pymoo baseline matched to the EvoGrad configuration."""
     name = algorithm_name.upper()
     
     if name == "DE":
@@ -396,11 +396,21 @@ def create_pymoo_algorithm(algorithm_name: str, pop_size: int):
                         adaptive=False,)
     elif name == "GA":
         from pymoo.algorithms.soo.nonconvex.ga import GA as PymooGA
-        return PymooGA(pop_size=pop_size,
-                       sampling=FloatRandomSampling(),)
+        from pymoo.operators.crossover.sbx import SBX
+        from pymoo.operators.mutation.pm import PM
+        return PymooGA(
+            pop_size=pop_size,
+            sampling=FloatRandomSampling(),
+            crossover=SBX(prob=1.0, prob_var=0.5, eta=15),
+            # EvoGrad's 0.9 mutation rate is per gene. In pymoo, prob is
+            # per individual and prob_var is the matching per-gene rate.
+            mutation=PM(prob=1.0, prob_var=0.9, eta=20),
+        )
     elif name == "CMAES":
         from pymoo.algorithms.soo.nonconvex.cmaes import CMAES as PymooCMAES
-        return PymooCMAES(sigma=0.1)
+        # Disable pymoo's [0,1] normalization so sigma=0.1 has the same raw
+        # coordinate scale as EvoGrad, and explicitly match population size.
+        return PymooCMAES(sigma=0.1, normalize=False, popsize=pop_size)
     else:
         raise ValueError(f"Unknown pymoo algorithm: {algorithm_name}")
 
@@ -523,6 +533,7 @@ def run_adam_population(
         # Backpropagate mean loss across population
         loss = f.mean()
         loss.backward()
+        evaluated_x = x.detach().clone()
         opt.step()
         
         # Project back to feasible region [xl, xu]
@@ -534,7 +545,7 @@ def run_adam_population(
             min_val = float(f[min_idx])
             if min_val < best:
                 best = min_val
-                best_solution = x[min_idx].detach().clone()
+                best_solution = evaluated_x[min_idx].clone()
 
         hist.append(best)
         evals += pop_size

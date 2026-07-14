@@ -246,10 +246,10 @@ class ReflectRepair(Repair):
         xu: Tensor,
     ) -> Tensor:
         # Compute range
-        span = xu - xl
+        original_span = xu - xl
         
         # Handle zero span (fixed variables)
-        span = torch.where(span > 0, span, torch.ones_like(span))
+        span = torch.where(original_span > 0, original_span, torch.ones_like(original_span))
         
         # Normalise to [0, 2*span] then fold
         x_shifted = x - xl
@@ -261,7 +261,7 @@ class ReflectRepair(Repair):
         # Shift back to original space
         x_repaired = xl + x_folded
         
-        return x_repaired
+        return torch.where(original_span > 0, x_repaired, xl.expand_as(x_repaired))
     
     def __repr__(self) -> str:
         return f"ReflectRepair(max_iterations={self.max_iterations})"
@@ -298,15 +298,15 @@ class WrapRepair(Repair):
         xl: Tensor,
         xu: Tensor,
     ) -> Tensor:
-        span = xu - xl
+        original_span = xu - xl
         
         # Handle zero span
-        span = torch.where(span > 0, span, torch.ones_like(span))
+        span = torch.where(original_span > 0, original_span, torch.ones_like(original_span))
         
         # Periodic wrapping
         x_wrapped = xl + torch.remainder(x - xl, span)
         
-        return x_wrapped
+        return torch.where(original_span > 0, x_wrapped, xl.expand_as(x_wrapped))
     
     def __repr__(self) -> str:
         return "WrapRepair()"

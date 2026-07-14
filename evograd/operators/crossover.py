@@ -769,8 +769,13 @@ class ExponentialCrossover(Crossover):
         
         # Continuation mask: 1 while u < CR (per-individual CR)
         cr_expanded = cr_val.unsqueeze(1)  # [N, 1]
-        cont = (u_rolled < cr_expanded).float()
-        cont[:, 0] = 1.0  # Always take at least one gene
+        if self.adaptive:
+            logits = torch.logit(cr_expanded.expand(-1, n_var).clamp(1e-7, 1 - 1e-7))
+            cont = binary_concrete(logits, temperature=self.temperature)
+        else:
+            cont = (u_rolled < cr_expanded).float()
+        # Always take at least one gene without an in-place autograd mutation.
+        cont = torch.cat([torch.ones_like(cont[:, :1]), cont[:, 1:]], dim=1)
         
         # Segment mask: 1 until first 0
         segment = torch.cumprod(cont, dim=1)
@@ -778,10 +783,6 @@ class ExponentialCrossover(Crossover):
         # Roll back to original gene order
         mask = torch.zeros_like(segment)
         mask.scatter_(1, indices, segment)
-        
-        if not self.adaptive:
-            # Hard mask
-            mask = mask.detach()
         
         # Trial vector
         trial = mask * parent2 + (1.0 - mask) * parent1
@@ -833,7 +834,7 @@ class UniformCrossover(Crossover):
             adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
-            learn_prob=False,
+            learn_prob=True,
             n_var=None,
         )
     
@@ -873,12 +874,14 @@ class UniformCrossover(Crossover):
         # Create offspring
         offspring = mask * parent1 + (1.0 - mask) * parent2
         
-        # Apply per-individual crossover probability
-        if not self.adaptive:
-            # Expand prob to [N, D]
-            prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
+        # Apply per-individual crossover probability in both modes.
+        prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
+        if self.adaptive:
+            prob_logits = torch.logit(prob_expanded[:, :1].clamp(1e-7, 1 - 1e-7))
+            do_cross = binary_concrete(prob_logits, temperature=self.temperature)
+        else:
             do_cross = (torch.rand(n_pairs, 1, device=device) < prob_expanded[:, :1]).float()
-            offspring = do_cross * offspring + (1 - do_cross) * parent1
+        offspring = do_cross * offspring + (1 - do_cross) * parent1
         
         return offspring
     
@@ -1051,7 +1054,7 @@ class NPointCrossover(Crossover):
             adaptive=adaptive,
             temperature=temperature,
             learn_temperature=True,
-            learn_prob=False,
+            learn_prob=True,
             n_var=None,
         )
         
@@ -1082,29 +1085,47 @@ class NPointCrossover(Crossover):
         device = parent1.device
         dtype = parent1.dtype
         
-        # Generate random crossover points
-        # For each individual, select n_points positions
-        points = torch.sort(
-            torch.randint(1, n_var, (n_pairs, self.n_points), device=device),
-            dim=1
-        ).values
-        
-        # Create mask based on crossover points
-        positions = torch.arange(n_var, device=device).unsqueeze(0)
-        
-        # Count how many crossover points are before each position
-        # Even count -> parent1, odd count -> parent2
-        count_before = (positions.unsqueeze(-1) >= points.unsqueeze(1)).sum(dim=-1)
-        mask = (count_before % 2 == 0).float()
+        if n_var == 1:
+            mask = torch.ones_like(parent1)
+        elif self.adaptive:
+            # Relax crossover boundaries. The cosine parity is exactly binary
+            # in the forward pass (ST switches) and differentiable backward.
+            switch_prob = min(1.0, self.n_points / (n_var - 1))
+            logits = torch.full(
+                (n_pairs, n_var - 1),
+                torch.logit(torch.tensor(switch_prob).clamp(1e-7, 1 - 1e-7)).item(),
+                device=device,
+                dtype=dtype,
+            )
+            switches = binary_concrete(logits, temperature=self.temperature)
+            parity = torch.cumsum(switches, dim=1)
+            mask = torch.cat(
+                [torch.ones(n_pairs, 1, device=device, dtype=dtype),
+                 0.5 * (1.0 + torch.cos(torch.pi * parity))],
+                dim=1,
+            )
+        else:
+            if self.n_points > n_var - 1:
+                raise ValueError(
+                    f"n_points={self.n_points} exceeds the {n_var - 1} available boundaries"
+                )
+            # Sample distinct crossover points independently per pair.
+            random_scores = torch.rand(n_pairs, n_var - 1, device=device)
+            points = random_scores.topk(self.n_points, dim=1).indices + 1
+            positions = torch.arange(n_var, device=device).view(1, n_var, 1)
+            count_before = (positions >= points.unsqueeze(1)).sum(dim=-1)
+            mask = (count_before % 2 == 0).to(dtype)
         
         offspring = mask * parent1 + (1.0 - mask) * parent2
         
-        # Apply per-individual crossover probability
-        if not self.adaptive:
-            # Expand prob to [N, D]
-            prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
+        # Apply per-individual crossover probability in both modes.
+        prob_expanded = expand_param(prob, self.prob, n_pairs, n_var, device, dtype)
+        if self.adaptive:
+            prob_logits = torch.logit(prob_expanded[:, :1].clamp(1e-7, 1 - 1e-7))
+            do_cross = binary_concrete(prob_logits, temperature=self.temperature)
+        else:
             do_cross = (torch.rand(n_pairs, 1, device=device) < prob_expanded[:, :1]).float()
-            offspring = do_cross * offspring + (1 - do_cross) * parent1
+        offspring = do_cross * offspring + (1 - do_cross) * parent1
         
         return offspring
     

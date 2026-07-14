@@ -44,7 +44,7 @@ from evograd.utils.callbacks import Callback
 from evograd.core.minimize import minimize
 from evograd.core.problem import Problem
 from evograd.core.result import Result
-from evograd.core.termination import Termination
+from evograd.core.termination import TargetReached, Termination, TerminationCollection
 
 if TYPE_CHECKING:
     from evograd.core.algorithm import Algorithm
@@ -87,6 +87,7 @@ class _NegatedProblem(Problem):
         self.n_ieq_constr = problem.n_ieq_constr
         self.n_eq_constr = problem.n_eq_constr
         self.n_constr = problem.n_constr
+        self.constraint_penalty = problem.constraint_penalty
         
         # Store reference to original problem
         self._original_problem = problem
@@ -201,8 +202,10 @@ def maximize(
 
         # Differentiable mode options:
         optimizer: PyTorch optimizer for gradient-based updates.
-        lr_pop: Learning rate for population updates.
-        lr_hyper: Learning rate for hyperparameter updates.
+        lr_pop: Population learning rate. ``None``/``0`` disables it; ``-1``
+            selects the algorithm default.
+        lr_hyper: Hyperparameter learning rate. ``None``/``0`` disables it;
+            ``-1`` selects the algorithm default.
         grad_clip_pop: Maximum gradient norm for population clipping.
         grad_clip_hyper: Maximum gradient norm for hyperparameter clipping.
         scheduler: Learning rate scheduler type.
@@ -239,6 +242,9 @@ def maximize(
         The returned fitness values are the ACTUAL values (not negated).
         If you're looking for minimum fitness, use minimize() instead.
     """
+    # Translate target criteria into the internal negated minimisation space.
+    translated_termination = _translate_termination_for_maximize(termination)
+
     # Wrap problem to negate objective
     negated_problem = _NegatedProblem(problem)
 
@@ -246,7 +252,7 @@ def maximize(
     result = minimize(
         problem=negated_problem,
         algorithm=algorithm,
-        termination=termination,
+        termination=translated_termination,
         seed=seed,
         verbose=verbose,
         callback=callback,
@@ -270,4 +276,43 @@ def maximize(
     result.problem_name = problem.name
     
     # Negate fitness values back to actual values
-    return _NegatedResult.from_minimization_result(result)
+    maximization_result = _NegatedResult.from_minimization_result(result)
+    target = _find_reached_target(termination, maximization_result.best_fitness)
+    if target is not None and maximization_result.success:
+        maximization_result.termination_reason = (
+            f"Target reached: {maximization_result.best_fitness:.6g} >= {target:.6g}"
+        )
+    return maximization_result
+
+
+def _translate_termination_for_maximize(
+    termination: Optional[Termination],
+) -> Optional[Termination]:
+    """Map target criteria from original maximisation to negated minimisation."""
+    if termination is None:
+        return None
+    if isinstance(termination, TargetReached):
+        return TargetReached(-termination.target_fitness, minimize=True)
+    if isinstance(termination, TerminationCollection):
+        return TerminationCollection(
+            [_translate_termination_for_maximize(c) for c in termination.criteria],
+            mode=termination.mode,
+        )
+    return termination
+
+
+def _find_reached_target(
+    termination: Optional[Termination],
+    best_fitness: float,
+) -> Optional[float]:
+    """Return a reached original-space target in a termination tree."""
+    if isinstance(termination, TargetReached):
+        if best_fitness >= termination.target_fitness:
+            return termination.target_fitness
+        return None
+    if isinstance(termination, TerminationCollection):
+        for criterion in termination.criteria:
+            target = _find_reached_target(criterion, best_fitness)
+            if target is not None:
+                return target
+    return None

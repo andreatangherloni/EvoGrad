@@ -422,24 +422,33 @@ class PolynomialMutation(Mutation):
         else:
             mask = (torch.rand(n_pop, n_var, device=device) < prob_expanded).float()
         
-        # Compute polynomial perturbation
+        # Compute bounded Deb polynomial mutation. The previous implementation
+        # scaled an unconstrained delta by the full range, allowing offspring to
+        # leave the declared domain even when the input was feasible.
         u = torch.rand(n_pop, n_var, device=device, dtype=dtype)
-        
-        # Polynomial distribution
         mut_pow = 1.0 / (eta_expanded + 1.0)
-        
-        delta = torch.where(
-            u < 0.5,
-            (2.0 * u).pow(mut_pow) - 1.0,
-            1.0 - (2.0 * (1.0 - u)).pow(mut_pow)
-        )
-        
-        # Scale by bounds range
         range_val = xu - xl
-        perturbation = delta * range_val
-        
-        # Apply mutation with mask
-        y = x + mask * perturbation
+        safe_range = torch.where(range_val > 0, range_val, torch.ones_like(range_val))
+        x_feasible = torch.clamp(x, xl, xu)
+        delta1 = (x_feasible - xl) / safe_range
+        delta2 = (xu - x_feasible) / safe_range
+
+        xy_lower = 1.0 - delta1
+        val_lower = 2.0 * u + (1.0 - 2.0 * u) * xy_lower.pow(eta_expanded + 1.0)
+        delta_lower = val_lower.clamp_min(1e-12).pow(mut_pow) - 1.0
+
+        xy_upper = 1.0 - delta2
+        val_upper = (
+            2.0 * (1.0 - u)
+            + 2.0 * (u - 0.5) * xy_upper.pow(eta_expanded + 1.0)
+        )
+        delta_upper = 1.0 - val_upper.clamp_min(1e-12).pow(mut_pow)
+        delta = torch.where(u <= 0.5, delta_lower, delta_upper)
+
+        mutated = x_feasible + delta * range_val
+        y = x_feasible + mask * (mutated - x_feasible)
+        y = torch.clamp(y, xl, xu)
+        y = torch.where(range_val > 0, y, xl.expand_as(y))
         
         return y
     

@@ -707,7 +707,12 @@ class SHADE(Algorithm):
         
         # 2. Crossover: binomial with per-individual CR
         # Use our BinomialCrossover with per-individual CR override
-        trial = self.crossover(self.population, donor, cr=self._current_CR)
+        # [N, 1] explicitly identifies CR as per-individual when N == D.
+        trial = self.crossover(
+            self.population,
+            donor,
+            cr=self._current_CR.unsqueeze(-1),
+        )
         
         # 3. Repair bounds
         if self.repair is not None:
@@ -910,14 +915,21 @@ class LSHADE(SHADE):
             selection_temperature=selection_temperature,
             dtype=dtype,
         )
+
+    def _setup_pop_size(self) -> None:
+        """Resolve the dimension-dependent initial size before sampling."""
+        if self.pop_size_init is None:
+            self.pop_size_init = 18 * self.problem.n_var
+        if self.pop_size_min > self.pop_size_init:
+            raise ValueError(
+                "pop_size_min must not exceed the initial population size"
+            )
+        self.pop_size = self.pop_size_init
+        self.n_offsprings = self.pop_size_init
     
     def _setup(self) -> None:
         """L-SHADE-specific setup after initialization."""
-        # Set default pop_size_init based on problem dimension
-        if self.pop_size_init is None:
-            self.pop_size_init = 18 * self.problem.n_var
-        # Always initialise the working population size (fixes target_pop_size
-        # AttributeError when pop_size_init was provided explicitly).
+        # _setup_pop_size has already resolved the dimension-dependent size.
         self._pop_size = self.pop_size_init
 
         # Create success-history memory with L-SHADE archive size
@@ -983,8 +995,6 @@ class LSHADE(SHADE):
         if target_size >= current_size:
             return
         
-        n_remove = current_size - target_size
-        
         # Get indices of best individuals to keep
         keep_idx = torch.argsort(self.fitness)[:target_size]
         
@@ -1004,6 +1014,8 @@ class LSHADE(SHADE):
             self.state.fitness = new_fitness
             self.state.population = self._population
             self._pop_size = target_size
+            self.pop_size = target_size
+            self.n_offsprings = target_size
         
         # Also reduce archive if needed
         self.memory.max_archive_size = int(self.archive_rate * target_size)

@@ -18,21 +18,27 @@ problem = Problem(
 
 # Genetic Algorithm
 ga = GA(pop_size=100, differentiable=True)
-result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42,
+                  lr_pop=-1, lr_hyper=-1)
 print(f"GA best: {result.best_fitness:.6f}")
 
 # Differential Evolution (adaptive hyperparameters)
 de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
-result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42,
+                  lr_hyper=-1)
 print(f"DE best: {result.best_fitness:.6f}")
 
 # CMA-ES
 cmaes = CMAES(pop_size=50, sigma=0.5, adaptive=True)
-result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42,
+                  lr_hyper=-1)
 print(f"CMA-ES best: {result.best_fitness:.6f}")
 ```
 
 The objective is any callable mapping a batch `(N, n_var)` to fitness `(N,)`; it may be
 non-differentiable (classical mode) or differentiable (gradient-enabled modes).
+Gradient updates are opt-in: the learning-rate defaults are `None`; pass `-1`
+for EvoGrad's algorithm-specific defaults or a numeric rate. Set both algorithm
+flags (`differentiable=False`, `adaptive=False`) for strict classical behavior.
 
 See the [User guide](guide.md) for the operating modes and per-algorithm options.

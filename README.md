@@ -58,22 +58,26 @@ problem = Problem(
 
 # Run with Genetic Algorithm
 ga = GA(pop_size=100, differentiable=True)
-result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42,
+                  lr_pop=-1, lr_hyper=-1)
 print(f"GA Best: {result.best_fitness:.6f}")
 
 # Run with Differential Evolution
 de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
-result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42,
+                  lr_hyper=-1)
 print(f"DE Best: {result.best_fitness:.6f}")
 
 # Run with Particle Swarm Optimisation
 pso = PSO(pop_size=100, adaptive=True, differentiable=True)
-result = minimize(problem, pso, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, pso, termination=MaxEvaluations(10000), seed=42,
+                  lr_pop=-1, lr_hyper=-1)
 print(f"PSO Best: {result.best_fitness:.6f}")
 
 # Run with CMA-ES
 cmaes = CMAES(sigma=0.5, adaptive=True)
-result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42)
+result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42,
+                  lr_hyper=-1)
 print(f"CMA-ES Best: {result.best_fitness:.6f}")
 ```
 
@@ -112,6 +116,12 @@ ga = GA(
 | `differentiable=True` | Population is an `nn.Parameter` (learnable via backprop) |
 | Operator `adaptive=True` | Operator uses Gumbel-Softmax/Binary-Concrete for gradient flow |
 | Operator `learn_*=True` | Operator hyperparameters become learnable `nn.Parameter` |
+
+Gradient optimizers are opt-in at the `minimize()` call. `lr_pop=None` and
+`lr_hyper=None` (the defaults) perform no backpropagation; use `-1` to select
+EvoGrad's algorithm-specific learning rate or pass a numeric value. For strict
+classical behavior, also construct the algorithm with `differentiable=False`
+and `adaptive=False`.
 
 ### Differential Evolution (DE)
 
@@ -426,6 +436,9 @@ The **Multi-Basin** functions aggregate `K` basins (each a full Rastrigin/Rosenb
 The runner evaluates the four EvoGrad modes — **Classical**, **Differentiable**, **Adaptive**, **Full** — and, by default, the **pymoo** and **Adam** (multi-start) baselines:
 
 ```bash
+# Install the manuscript's pinned cross-library baseline
+pip install -r requirements-benchmarks.txt
+
 # 30 runs of DE on the full CEC 2017 suite in 30D (vs pymoo + Adam)
 python -m evograd.benchmarks.run_benchmark_functions -a DE -s cec2017 -D 30 -r 30
 

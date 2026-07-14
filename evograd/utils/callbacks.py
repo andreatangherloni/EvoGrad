@@ -80,7 +80,8 @@ class CallbackState:
     
     Attributes:
         generation: Current generation number (0-indexed).
-        n_evals: Total number of fitness evaluations so far.
+        n_evals: Counted initial/offspring fitness evaluations so far. Live
+            parent graph-reconstruction passes are excluded by convention.
         max_evals: Maximum allowed fitness evaluations.
         max_generations: Maximum allowed generations (if set).
         best_fitness: Best fitness value found so far.

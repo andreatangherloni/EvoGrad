@@ -45,13 +45,13 @@ class ShiftedFunction(BenchmarkFunction):
             shift: Shift vector of shape [n_var]. If None, generated randomly.
             seed: Random seed for generating shift vector.
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"shifted_{base_function.name}"
         self.optimal_value = base_function.optimal_value
         
@@ -102,13 +102,13 @@ class RotatedFunction(BenchmarkFunction):
                             If None, generated randomly.
             seed: Random seed for generating rotation matrix.
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"rotated_{base_function.name}"
         self.optimal_value = base_function.optimal_value
         
@@ -162,13 +162,13 @@ class ShiftedRotatedFunction(BenchmarkFunction):
             rotation_matrix: Rotation matrix. If None, generated randomly.
             seed: Random seed for random generation.
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"shifted_rotated_{base_function.name}"
         self.optimal_value = base_function.optimal_value
         
@@ -228,13 +228,13 @@ class ScaledFunction(BenchmarkFunction):
             base_function: Base function to scale.
             scale: Scale factor (scalar or per-dimension tensor).
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"scaled_{base_function.name}"
         self.optimal_value = base_function.optimal_value
         
@@ -275,13 +275,13 @@ class AsymmetricFunction(BenchmarkFunction):
             base_function: Base function to transform.
             beta: Asymmetry parameter (typically 0.5).
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"asymmetric_{base_function.name}"
         self.optimal_value = base_function.optimal_value
         self.beta = beta
@@ -329,13 +329,13 @@ class OscillatedFunction(BenchmarkFunction):
         Args:
             base_function: Base function to transform.
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"oscillated_{base_function.name}"
         self.optimal_value = base_function.optimal_value
         
@@ -389,13 +389,13 @@ class BiasedFunction(BenchmarkFunction):
             base_function: Base function.
             bias: Value added to function output.
         """
+        self.base_function = base_function
         super().__init__(
             n_var=base_function.n_var,
             xl=base_function.xl,
             xu=base_function.xu,
         )
         
-        self.base_function = base_function
         self.name = f"biased_{base_function.name}"
         self.optimal_value = base_function.optimal_value + bias
         self.bias = bias

@@ -251,7 +251,6 @@ class MultiBasinRosenbrock(BenchmarkFunction):
         # Generate shifts (funnel centers offset from optimum)
         # Optimum of shifted Rosenbrock(y) is at y = 1, so x* = center + 1
         centers = torch.randn(n_funnels, n_var, generator=g) * shift_scale
-        centers = centers.clamp(xl - 1.0, xu - 1.0)  # Keep optima in bounds
         self._centers = centers
         
         # Generate biases (funnel 0 is global best)
@@ -270,10 +269,20 @@ class MultiBasinRosenbrock(BenchmarkFunction):
             ])
         else:
             self._rotations = torch.eye(n_var).unsqueeze(0).expand(n_funnels, -1, -1)
+
+        # Keep every component's Rosenbrock optimum inside the declared bounds.
+        # For row-vector evaluation y=(x-centre)@R, the optimum offset is 1@R.T.
+        ones = torch.ones(n_var, dtype=self._centers.dtype)
+        optimum_offsets = torch.stack(
+            [ones @ rotation.T for rotation in self._rotations]
+        )
+        optima = (self._centers + optimum_offsets).clamp(xl, xu)
+        self._centers = optima - optimum_offsets
         
-        # Global optimum
-        self._optimal_x = (self._rotations[0].T @ (self._centers[0] + 1.0))
-        self._optimal_value = float(self._biases[0].item())
+        # Reference optimum of the unbiased Rosenbrock component. Evaluation
+        # uses row vectors y=(x-centre)@R, hence x=centre+1@R.T.
+        self._optimal_x = self._centers[0] + ones @ self._rotations[0].T
+        self._optimal_value = float(self(self._optimal_x.unsqueeze(0))[0])
     
     @property
     def optimal_x(self) -> Tensor:
