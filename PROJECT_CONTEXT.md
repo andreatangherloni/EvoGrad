@@ -12,7 +12,7 @@ EvoGrad is a research-oriented Python library and accompanying academic manuscri
 ## Coding Conventions
 - **Mathematical Rigor**: Implementations must be theoretically sound across all coordinate spaces. Agents must carefully evaluate edge cases in gradient derivations, paying special attention to boundary conditions and zero-expression mappings (always verify that derived formulas hold true when variables equal zero).
 - **Reproducibility**: Maintaining exact API compatibility and numerical consistency is mandatory. Algorithmic updates must not invalidate the historical performance tables, break seeded reproducibility, or silently alter results on established benchmarks.
-- **Version Control**: The project follows GitLab branch management and Merge Request protocols.
+- **Version Control**: The project follows GitHub branch management and Pull Request protocols.
 - **Testing Requirements**: Passing the full integrated test suite, including all audit regressions, is a strict prerequisite before any mathematical or architectural changes are merged.
 
 ## Current Focus
