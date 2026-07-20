@@ -430,23 +430,49 @@ class PSO(Algorithm):
             offspring: New particle positions [pop_size, n_var].
             offspring_fitness: Fitness at new positions [pop_size].
         """
-        # Update personal bests
-        new_p_best, new_p_best_fitness = self._update_personal_best(
-            offspring, offspring_fitness
-        )
-        
-        # Update state
-        self._update_state(
-            new_pos=offspring,
-            new_fitness=offspring_fitness,
-            new_velocity=self._pending_velocity,
-            new_p_best=new_p_best,
-            new_p_best_fitness=new_p_best_fitness,
-        )
-        
-        # Update global best
+        if self.differentiable and isinstance(self._population, nn.Parameter):
+            # In differentiable mode the SGD step has already moved the
+            # population, so _update_state commits the combined position
+            # P₀ + v − lr·∇, which differs from the evaluated offspring P₀ + v.
+            # Commit first (leaving personal bests untouched), then re-evaluate
+            # at the committed position and pair fitness, personal-best, and
+            # global-best with it. This keeps state.population, state.fitness,
+            # and the bests mutually consistent. The extra objective pass is
+            # uncounted (like the live-selection pass) — _evaluate does not
+            # increment n_evals.
+            self._update_state(
+                new_pos=offspring,
+                new_fitness=offspring_fitness,
+                new_velocity=self._pending_velocity,
+                new_p_best=self._p_best,
+                new_p_best_fitness=self._p_best_fitness,
+            )
+            committed = self._population
+            committed_fitness = self._evaluate(committed)
+            new_p_best, new_p_best_fitness = self._update_personal_best(
+                committed, committed_fitness
+            )
+            with torch.no_grad():
+                self._p_best.copy_(new_p_best)
+                self._p_best_fitness.copy_(new_p_best_fitness)
+            self.state.fitness = committed_fitness
+        else:
+            # Classical / adaptive-only path: the committed position is exactly
+            # the evaluated offspring, so no re-evaluation is needed.
+            new_p_best, new_p_best_fitness = self._update_personal_best(
+                offspring, offspring_fitness
+            )
+            self._update_state(
+                new_pos=offspring,
+                new_fitness=offspring_fitness,
+                new_velocity=self._pending_velocity,
+                new_p_best=new_p_best,
+                new_p_best_fitness=new_p_best_fitness,
+            )
+
+        # Update global best at the committed, consistently-evaluated positions
         self.state.update_best(self.population, self.state.fitness)
-        
+
         # Cleanup
         if hasattr(self, '_pending_velocity'):
             del self._pending_velocity
@@ -467,6 +493,11 @@ class PSO(Algorithm):
         We combine both forces so that the final position is
         ``P₀ + v − lr·∇``, preserving the gradient correction that
         would otherwise be overwritten by ``copy_(new_pos)``.
+
+        ``new_fitness`` is evaluated at ``P₀ + v`` (the offspring), not at the
+        committed position; in differentiable mode ``_advance`` re-evaluates at
+        the committed position and overwrites ``state.fitness`` so that the
+        population and its fitness remain consistent.
         """
         with torch.no_grad():
             if self.differentiable and isinstance(self._population, nn.Parameter):

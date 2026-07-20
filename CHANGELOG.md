@@ -5,6 +5,7 @@
 ### Fixed
 
 - Keep `best_solution` paired with the coordinates at which `best_fitness` was evaluated.
+- Keep the differentiable PSO population consistent with its fitness: the committed position (`P₀ + v − lr·∇`) is now re-evaluated so `population`, `fitness`, and the personal/global bests all agree (previously `fitness` was that of the pre-gradient position `P₀ + v`). Benchmarks show no change in optimisation quality; the extra objective pass is uncounted in `n_evals`.
 - Avoid autograd/backward work and stale gradient accumulation when both learning rates are disabled.
 - Enforce declared constraints through the configurable `Problem.constraint_penalty` and report final feasibility.
 - Translate nested `TargetReached` criteria correctly in `maximize()`.

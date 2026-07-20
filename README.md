@@ -480,6 +480,37 @@ The **Adaptive** variant reaches the lowest mean/variance, while **Full** matche
 
 > Full experimental details are in the paper (see [Citation](#-citation)).
 
+### Reproducibility note (v0.3.0)
+
+The results reported above and in the paper were produced with the **paper-era
+code (`evograd-diff` v0.1.2)**. Version 0.3.0 incorporates a set of
+post-publication audit fixes that can change the *absolute* numbers, so results
+obtained with v0.3.0 may differ from the published tables. The corrections that
+affect benchmark values include:
+
+- a restored cyclic term in the Expanded Schaffer F6 component, which changes
+  CEC 2017 **F16, F19, F26–F30**;
+- NaN-free CEC 2017 composition weights at component centres and the true CEC
+  **F9** optimum location (F8/F9 numerics otherwise preserved);
+- matched **pymoo** GA/CMA-ES baseline configurations (population size, per-gene
+  operator probabilities, un-normalised CMA-ES step size);
+- a consistent **Adam** baseline (fitness paired with the evaluated iterate);
+- **scale-invariant** softmax recombination in differentiable CMA-ES; and
+- consistent differentiable-**PSO** state (the committed position is re-evaluated so
+  population and fitness agree; optimisation quality is unchanged).
+
+These changes primarily affect absolute fitness values and the cross-library
+baseline comparisons; the paper's qualitative findings (all EvoGrad variants and
+baselines within a run share the same objective implementation) are not expected
+to change, but the exact significance percentages and per-function rankings will.
+**To reproduce the paper exactly, install the paper-era release:**
+
+```bash
+pip install evograd-diff==0.1.2
+```
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the complete list of changes.
+
 ## 📖 Citation
 
 EvoGrad was accepted at the **IEEE Congress on Evolutionary Computation (CEC) 2026**. If you use EvoGrad in your research, please cite:

@@ -80,6 +80,30 @@ def test_best_solution_fitness_pairing():
     assert abs(actual - result.best_fitness) < 1e-6
 
 
+def test_pso_population_fitness_consistency():
+    # In differentiable mode PSO commits the combined position P0 + v - lr*grad
+    # but historically stored the fitness of P0 + v, desyncing population and
+    # fitness. The committed position must now carry its own fitness.
+    problem = Problem(sphere, 10, -100.0, 100.0)
+    for kwargs in (
+        dict(differentiable=True, adaptive=False),
+        dict(differentiable=True, adaptive=True),
+    ):
+        result = minimize(
+            problem,
+            PSO(pop_size=20, **kwargs),
+            MaxGenerations(40),
+            seed=0,
+            verbose=False,
+            lr_pop=-1,
+            lr_hyper=-1,
+            grad_clip_pop=-1,
+            grad_clip_hyper=-1,
+        )
+        recomputed = problem.evaluate(result.population)
+        assert float((recomputed - result.fitness).abs().max()) < 1e-6, kwargs
+
+
 def test_constraints_and_result_feasibility_flag():
     problem = Problem(
         lambda x: x[:, 0],
@@ -320,6 +344,7 @@ def test_multibasin_rosenbrock_reference_optimum_is_in_bounds():
 TESTS = (
     test_default_lr_is_classical_and_minus_one_learns,
     test_best_solution_fitness_pairing,
+    test_pso_population_fitness_consistency,
     test_constraints_and_result_feasibility_flag,
     test_maximize_nested_target,
     test_lshade_reduces_in_classical_and_differentiable_modes,
