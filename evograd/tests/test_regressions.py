@@ -209,6 +209,19 @@ def test_n_equals_d_parameter_disambiguation_and_shade_path():
     assert torch.equal(per_individual[:, 0], torch.arange(4.0))
     assert bool((per_individual == per_individual[:, :1]).all())
 
+    # N == D == 1 is unambiguous (both interpretations give the same [1, 1]);
+    # it must not raise the disambiguation error.
+    singleton = expand_param(
+        torch.tensor([0.9]),
+        0.0,
+        1,
+        1,
+        torch.device("cpu"),
+        torch.float32,
+    )
+    assert singleton.shape == (1, 1)
+    assert abs(float(singleton) - 0.9) < 1e-6
+
 
 def test_all_transform_wrappers_construct():
     base = Sphere(3)
@@ -268,13 +281,16 @@ def test_cmaes_soft_weights_are_scale_invariant_and_converge():
     problem = Problem(sphere, 10, -5.0, 5.0)
     algorithm = CMAES(differentiable=True)
     algorithm.initialize(problem)
-    fitness = torch.tensor([0.1, 0.4, 1.0, 2.0])
+    # Fitness always arrives on the algorithm's device in production; match it
+    # so the test exercises the real code path on CPU and accelerators alike.
+    device = algorithm.selection_temperature.device
+    fitness = torch.tensor([0.1, 0.4, 1.0, 2.0], device=device)
     weights = algorithm._soft_recombination_weights(fitness)
     scaled = algorithm._soft_recombination_weights(1000 * fitness + 123.0)
     assert torch.allclose(weights, scaled, atol=1e-6, rtol=1e-6)
-    constant = algorithm._soft_recombination_weights(torch.full((4,), 123.0))
+    constant = algorithm._soft_recombination_weights(torch.full((4,), 123.0, device=device))
     assert torch.isfinite(constant).all()
-    assert torch.allclose(constant, torch.full((4,), 0.25))
+    assert torch.allclose(constant, torch.full((4,), 0.25, device=device))
 
     result = minimize(
         problem,

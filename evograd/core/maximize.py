@@ -206,8 +206,10 @@ def maximize(
             selects the algorithm default.
         lr_hyper: Hyperparameter learning rate. ``None``/``0`` disables it;
             ``-1`` selects the algorithm default.
-        grad_clip_pop: Maximum gradient norm for population clipping.
-        grad_clip_hyper: Maximum gradient norm for hyperparameter clipping.
+        grad_clip_pop: Population gradient clipping. ``-1`` selects the
+            algorithm default; ``None`` disables clipping.
+        grad_clip_hyper: Hyperparameter gradient clipping. ``-1`` selects the
+            algorithm default; ``None`` disables clipping.
         scheduler: Learning rate scheduler type.
         scheduler_patience: Generations before reducing LR.
         scheduler_factor: Factor to multiply LR when reducing.

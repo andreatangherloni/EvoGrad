@@ -155,7 +155,12 @@ def expand_param(
         # Scalar -> [N, D]
         return val.expand(n_pop, n_var)
     elif val.dim() == 1:
-        if val.shape[0] == n_var and val.shape[0] == n_pop and param is not None:
+        if (
+            val.shape[0] == n_var
+            and val.shape[0] == n_pop
+            and n_pop > 1
+            and param is not None
+        ):
             raise ValueError(
                 "Ambiguous 1D parameter because n_pop == n_var. Pass an "
                 "[N, 1] tensor for per-individual values or [1, D] for "

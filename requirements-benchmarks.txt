@@ -1,0 +1,2 @@
+# Reference baseline version used by the manuscript experiments.
+pymoo==0.6.1.5

@@ -70,7 +70,11 @@ def rastrigin(x: Tensor) -> Tensor:
 def expanded_schaffers_f6(x: Tensor) -> Tensor:
     """
     Expanded Schaffer's F6 function.
-    f(x) = sum(0.5 + (sin^2(sqrt(x_i^2 + x_{i+1}^2)) - 0.5) / (1 + 0.001*(x_i^2 + x_{i+1}^2))^2)
+
+    The sum is cyclic over all D pairs (i, i+1 mod D), i.e. it includes the
+    wrap-around term g(x_D, x_1), matching the official CEC 2017 reference:
+    f(x) = sum_{i=1}^{D} g(x_i, x_{i+1 mod D}),
+    g(a, b) = 0.5 + (sin^2(sqrt(a^2 + b^2)) - 0.5) / (1 + 0.001*(a^2 + b^2))^2
     """
     # The expanded CEC definition is cyclic and includes g(x_D, x_1).
     x_i = x
