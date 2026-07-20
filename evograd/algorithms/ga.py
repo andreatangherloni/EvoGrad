@@ -69,6 +69,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from evograd.core.algorithm import Algorithm
+from evograd.operators.repair import clamp_to_bounds
 
 if TYPE_CHECKING:
     from evograd.core.problem import Problem
@@ -274,7 +275,15 @@ class GA(Algorithm):
         
         # 3. MUTATION: Introduce variation
         offspring = self.mutation(offspring, self.xl, self.xu)
-        
+
+        # 4. Bound safety: when no repair operator is configured, clamp to the
+        #    box so out-of-bounds points are never evaluated regardless of the
+        #    mutation/crossover operators (mirrors DE/PSO/CMA-ES/SHADE). When a
+        #    repair IS configured the base step/forward applies it. This is a
+        #    no-op for the bounded default PolynomialMutation.
+        if self.repair is None:
+            offspring = clamp_to_bounds(offspring, self.xl, self.xu)
+
         return offspring
     
     def _advance(self, offspring: Tensor, offspring_fitness: Tensor) -> None:

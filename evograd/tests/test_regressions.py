@@ -6,7 +6,7 @@ import warnings
 
 import torch
 
-from evograd.algorithms import CMAES, DE, LSHADE, PSO, cmaes_large, cmaes_small
+from evograd.algorithms import CMAES, DE, GA, LSHADE, PSO, SHADE, cmaes_large, cmaes_small
 from evograd.benchmarks.functions import (
     AsymmetricFunction,
     BiasedFunction,
@@ -28,7 +28,7 @@ from evograd.core import (
     maximize,
     minimize,
 )
-from evograd.operators import PolynomialMutation
+from evograd.operators import GaussianMutation, PolynomialMutation
 from evograd.operators.crossover import (
     ExponentialCrossover,
     NPointCrossover,
@@ -341,6 +341,64 @@ def test_multibasin_rosenbrock_reference_optimum_is_in_bounds():
         assert abs(value - function.optimal_value) < 1e-6
 
 
+def _neg_sum(x):
+    return -x.sum(dim=-1)
+
+
+def test_bound_enforcement_is_operator_and_mode_independent():
+    # No algorithm/operator/mode combination may evaluate or return a point
+    # outside [xl, xu]. The optimum is pulled to the upper corner to stress it.
+    xl, xu, d = -1.0, 1.0, 8
+    lr = dict(lr_pop=-1, lr_hyper=-1, grad_clip_pop=-1, grad_clip_hyper=-1)
+    cases = (
+        # GA bound safety must not depend on the mutation operator (a
+        # non-clamping Gaussian mutation with no repair used to escape badly).
+        (lambda: GA(pop_size=20, mutation=GaussianMutation(sigma=0.1),
+                    differentiable=False, adaptive=False), {}),
+        # DE / SHADE differentiable: the gradient step is projected back to box.
+        (lambda: DE(pop_size=20, differentiable=True, adaptive=True), lr),
+        (lambda: SHADE(pop_size=20, differentiable=True, adaptive=True), lr),
+    )
+    for make_algo, kwargs in cases:
+        seen = {"max_oob": 0.0}
+
+        def objective(x, _seen=seen):
+            over = float(torch.clamp(x - xu, min=0).max())
+            under = float(torch.clamp(xl - x, min=0).max())
+            _seen["max_oob"] = max(_seen["max_oob"], over, under)
+            return _neg_sum(x)
+
+        problem = Problem(objective, d, xl, xu)
+        result = minimize(problem, make_algo(), MaxGenerations(30),
+                          seed=0, verbose=False, **kwargs)
+        assert seen["max_oob"] < 1e-6, (make_algo, seen["max_oob"])
+        best = result.best_solution
+        best_oob = float(max(torch.clamp(best - xu, min=0).max(),
+                             torch.clamp(xl - best, min=0).max()))
+        assert best_oob < 1e-6, (make_algo, best_oob)
+
+
+def test_result_exposes_raw_objective_when_infeasible():
+    # best_fitness folds in the constraint penalty; when the returned best is
+    # infeasible, result.extra must expose the true (unpenalised) objective.
+    problem = Problem(
+        lambda x: 1e7 * x[:, 0],
+        1,
+        0.0,
+        1.0,
+        constraints=[(lambda x: 0.8 - x[:, 0], "ineq")],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = minimize(problem, DE(pop_size=30), MaxEvaluations(3000),
+                          seed=42, verbose=False)
+    assert result.extra["best_feasible"] is False
+    raw = result.extra["best_raw_objective"]
+    assert raw < result.best_fitness - 1.0  # penalty inflated best_fitness
+    recomputed = float(problem.evaluate(result.best_solution.reshape(1, -1)).reshape(-1)[0])
+    assert abs(raw - recomputed) < 1e-6
+
+
 TESTS = (
     test_default_lr_is_classical_and_minus_one_learns,
     test_best_solution_fitness_pairing,
@@ -356,6 +414,8 @@ TESTS = (
     test_cec_rosenbrock_noncyclic_and_schaffer_cyclic,
     test_cmaes_soft_weights_are_scale_invariant_and_converge,
     test_multibasin_rosenbrock_reference_optimum_is_in_bounds,
+    test_bound_enforcement_is_operator_and_mode_independent,
+    test_result_exposes_raw_objective_when_infeasible,
 )
 
 

@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 import torch
 
 from evograd.core.result import Result, ResultBuilder
+from evograd.operators.repair import clamp_to_bounds
 from evograd.core.termination import (
     Termination,
     TerminationCollection,
@@ -451,6 +452,15 @@ def minimize(
             "best_constraint_violation",
             float(problem.evaluate_constraints(algorithm.best_solution)["cv"]),
         )
+        # Expose the raw objective value: best_fitness includes the constraint
+        # penalty, so for an infeasible best it is an inflated composite rather
+        # than the true objective. This lets callers recover the real value.
+        builder.add_extra(
+            "best_raw_objective",
+            float(
+                problem.evaluate(algorithm.best_solution.reshape(1, -1)).reshape(-1)[0]
+            ),
+        )
         if not feasible:
             warnings.warn(
                 "The returned best solution is infeasible under the declared "
@@ -790,7 +800,23 @@ def _step_differentiable(
     # Optimizer step
     for opt in optimizers:
         opt.step()
-    
+
+    # Projected step: the gradient update can push the population Parameter
+    # outside [xl, xu]. Clamp it back before it is committed / re-evaluated so
+    # differentiable runs never evaluate or return out-of-bounds solutions
+    # (mirrors the per-trial clamping every operator applies). This is a no-op
+    # when the step stayed in bounds, and only the decision-variable population
+    # is clamped — hyperparameters (e.g. CMA-ES mean, learnable rates) are not.
+    if (
+        isinstance(algorithm.population, torch.nn.Parameter)
+        and getattr(algorithm, "xl", None) is not None
+        and getattr(algorithm, "xu", None) is not None
+    ):
+        with torch.no_grad():
+            algorithm.population.data.copy_(
+                clamp_to_bounds(algorithm.population.data, algorithm.xl, algorithm.xu)
+            )
+
     # Commit evolutionary changes
     old_population_param = algorithm.population if isinstance(algorithm.population, torch.nn.Parameter) else None
     algorithm.update_state()
