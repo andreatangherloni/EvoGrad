@@ -58,26 +58,22 @@ problem = Problem(
 
 # Run with Genetic Algorithm
 ga = GA(pop_size=100, differentiable=True)
-result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42,
-                  lr_pop=-1, lr_hyper=-1)
+result = minimize(problem, ga, termination=MaxEvaluations(10000), seed=42)
 print(f"GA Best: {result.best_fitness:.6f}")
 
 # Run with Differential Evolution
 de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
-result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42,
-                  lr_hyper=-1)
+result = minimize(problem, de, termination=MaxEvaluations(10000), seed=42)
 print(f"DE Best: {result.best_fitness:.6f}")
 
 # Run with Particle Swarm Optimisation
 pso = PSO(pop_size=100, adaptive=True, differentiable=True)
-result = minimize(problem, pso, termination=MaxEvaluations(10000), seed=42,
-                  lr_pop=-1, lr_hyper=-1)
+result = minimize(problem, pso, termination=MaxEvaluations(10000), seed=42)
 print(f"PSO Best: {result.best_fitness:.6f}")
 
 # Run with CMA-ES
 cmaes = CMAES(sigma=0.5, adaptive=True)
-result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42,
-                  lr_hyper=-1)
+result = minimize(problem, cmaes, termination=MaxEvaluations(10000), seed=42)
 print(f"CMA-ES Best: {result.best_fitness:.6f}")
 ```
 
@@ -117,11 +113,17 @@ ga = GA(
 | Operator `adaptive=True` | Operator uses Gumbel-Softmax/Binary-Concrete for gradient flow |
 | Operator `learn_*=True` | Operator hyperparameters become learnable `nn.Parameter` |
 
-Gradient optimizers are opt-in at the `minimize()` call. `lr_pop=None` and
-`lr_hyper=None` (the defaults) perform no backpropagation; use `-1` to select
-EvoGrad's algorithm-specific learning rate or pass a numeric value. For strict
-classical behavior, also construct the algorithm with `differentiable=False`
-and `adaptive=False`.
+Gradient optimizers follow the algorithm's flags. With the learning-rate
+defaults (`lr_pop=None`, `lr_hyper=None`), `minimize()` resolves each channel
+automatically: if the flag exposes learnable parameters and the objective
+provides a gradient (checked once with an RNG-neutral probe evaluation),
+EvoGrad's algorithm-specific learning rate is used; if the flag exposes
+learnable parameters but the objective is black-box, the channel falls back
+to the classical update with a warning; channels whose flags are off stay
+classical silently. Pass a numeric rate to override (`lr_pop` is additionally
+scaled by `1/√n_var`), or `0` to disable a channel explicitly. For strict
+classical behavior, construct the algorithm with `differentiable=False` and
+`adaptive=False`.
 
 ### Differential Evolution (DE)
 

@@ -202,14 +202,22 @@ def maximize(
 
         # Differentiable mode options:
         optimizer: PyTorch optimizer for gradient-based updates.
-        lr_pop: Population learning rate. ``None``/``0`` disables it; ``-1``
-            selects the algorithm default.
-        lr_hyper: Hyperparameter learning rate. ``None``/``0`` disables it;
-            ``-1`` selects the algorithm default.
-        grad_clip_pop: Population gradient clipping. ``-1`` selects the
-            algorithm default; ``None`` disables clipping.
-        grad_clip_hyper: Hyperparameter gradient clipping. ``-1`` selects the
-            algorithm default; ``None`` disables clipping.
+        lr_pop: Population learning rate. ``None`` (default) resolves
+            automatically: the per-algorithm default when the population is
+            learnable and the objective provides a gradient; classical with a
+            warning when the population is learnable but the objective is
+            black-box; classical silently when the population is not
+            learnable. ``0`` explicitly disables it; positive values are
+            used verbatim (an inconclusive probe honors them); negative
+            values raise (the former ``-1`` sentinel was removed in 0.4.0).
+            The resolved value is additionally scaled by ``1/sqrt(n_var)``.
+        lr_hyper: Hyperparameter learning rate. Same resolution rules as
+            ``lr_pop``, without the dimension scaling.
+        grad_clip_pop: Population gradient clipping. ``None`` selects the
+            per-algorithm default when the channel is gradient-driven;
+            ``0`` disables clipping; negative values raise.
+        grad_clip_hyper: Hyperparameter gradient clipping. Same rules as
+            ``grad_clip_pop``.
         scheduler: Learning rate scheduler type.
         scheduler_patience: Generations before reducing LR.
         scheduler_factor: Factor to multiply LR when reducing.

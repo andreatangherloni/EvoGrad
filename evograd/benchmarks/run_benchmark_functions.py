@@ -581,10 +581,10 @@ def run_evograd_single(
     seed: int,
     max_evals: int,
     pop_size: int,
-    lr_pop: float,
-    lr_hyper: float,
-    grad_clip_pop: float,
-    grad_clip_hyper: float,
+    lr_pop: Optional[float],
+    lr_hyper: Optional[float],
+    grad_clip_pop: Optional[float],
+    grad_clip_hyper: Optional[float],
     device: str,
 ) -> RunResult:
     """Run a single EvoGrad optimization."""
@@ -836,10 +836,10 @@ def run_benchmark_parallel(
     xl: float,
     xu: float,
     max_evals: int,
-    lr_pop: float,
-    lr_hyper: float,
-    grad_clip_pop: float,
-    grad_clip_hyper: float,
+    lr_pop: Optional[float],
+    lr_hyper: Optional[float],
+    grad_clip_pop: Optional[float],
+    grad_clip_hyper: Optional[float],
     n_runs: int = 30,
     pop_size: int = 100,
     device: str = "cpu",
@@ -1101,10 +1101,20 @@ Examples:
     parser.add_argument("--list_functions", action="store_true",
                         help="List all available functions and exit")
     
-    parser.add_argument("--lr_pop", type=float, default=-1)
-    parser.add_argument("--lr_hyper", type=float, default=-1)
-    parser.add_argument("--grad_clip_pop", type=float, default=-1)
-    parser.add_argument("--grad_clip_hyper", type=float, default=-1)
+    parser.add_argument("--lr_pop", type=float, default=None,
+                        help="Population learning rate. Omit for the "
+                             "per-algorithm default (auto); 0 disables "
+                             "population gradient updates.")
+    parser.add_argument("--lr_hyper", type=float, default=None,
+                        help="Hyperparameter learning rate. Omit for the "
+                             "per-algorithm default (auto); 0 disables "
+                             "hyperparameter gradient updates.")
+    parser.add_argument("--grad_clip_pop", type=float, default=None,
+                        help="Population gradient clipping. Omit for the "
+                             "per-algorithm default; 0 disables clipping.")
+    parser.add_argument("--grad_clip_hyper", type=float, default=None,
+                        help="Hyperparameter gradient clipping. Omit for the "
+                             "per-algorithm default; 0 disables clipping.")
     parser.add_argument("--deterministic", action="store_true",
                         help="Enable deterministic mode for reproducibility (may be slower)")
     parser.add_argument("--base_seed", type=int, default=0,

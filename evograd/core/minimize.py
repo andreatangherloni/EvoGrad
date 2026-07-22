@@ -37,10 +37,12 @@ Example:
 
 from __future__ import annotations
 
+import random
 import time
 import warnings
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+import numpy as np
 import torch
 
 from evograd.core.result import Result, ResultBuilder
@@ -109,7 +111,16 @@ def minimize(
     Differentiable Mode
     -------------------
     EvoGrad automatically detects learnable parameters (nn.Parameter with
-    requires_grad=True) and uses backpropagation to update them. This covers:
+    requires_grad=True) and uses backpropagation to update them, provided the
+    objective actually provides a gradient. This is verified once per run
+    with a cheap probe: an evaluation at the midpoint of the box bounds —
+    including the exterior constraint penalty for constrained problems, i.e.
+    the same composite the differentiable loss uses — whose output is checked
+    for a ``grad_fn`` (RNG-neutral for torch/NumPy/Python generators and
+    excluded from ``n_evals``; retried with a population-sized batch if the
+    objective rejects single rows). If the objective is black-box (its output
+    is detached), every gradient channel falls back to the classical update
+    with a warning. Learnable parameters cover:
     
     - Population updates: algorithm.differentiable=True
     - Operator hyperparameters: operator.differentiable=True  
@@ -158,15 +169,35 @@ def minimize(
 
         # Differentiable mode options (used if learnable params exist):
         optimizer: PyTorch optimizer for gradient-based updates.
-            If None, SGD is used with specified lr.
-        lr_pop: Population learning rate. ``None`` or ``0`` preserves classical
-            behavior; ``-1`` explicitly selects the algorithm default.
-        lr_hyper: Hyperparameter learning rate. ``None`` or ``0`` disables
-            hyperparameter updates; ``-1`` selects the algorithm default.
-        grad_clip_pop: Population gradient clipping. ``-1`` selects the
-            algorithm default; ``None`` disables clipping.
-        grad_clip_hyper: Hyperparameter gradient clipping. ``-1`` selects the
-            algorithm default; ``None`` disables clipping.
+            If None, SGD (population) / Adam (hyperparameters) are built from
+            the resolved learning rates below.
+        lr_pop: Population learning rate (SGD; requires
+            ``algorithm.differentiable=True``). ``None`` (default) resolves
+            automatically: if the population is learnable and the objective
+            provides a gradient (checked once with an RNG-neutral probe
+            evaluation), the per-algorithm default is used; if the population
+            is learnable but the objective is black-box, the update stays
+            classical with a warning; if the population is not learnable at
+            all, it stays classical silently. ``0`` explicitly disables
+            population gradient updates (warning). Positive values are used
+            verbatim when the objective provides a gradient (warning +
+            classical fallback when it provably does not; an inconclusive
+            probe honors the explicit request). Negative values raise (the
+            former ``-1`` sentinel was removed in 0.4.0). Note: the resolved
+            ``lr_pop`` — default or explicit — is additionally scaled by
+            ``1/sqrt(n_var)``; ``result.extra['lr_pop_effective']`` reports
+            the scaled value.
+        lr_hyper: Hyperparameter learning rate (Adam; requires
+            ``adaptive=True`` and/or differentiable operators). Same
+            resolution rules as ``lr_pop``, but without the dimension
+            scaling. Both are ignored (with a warning) when ``optimizer=``
+            is supplied.
+        grad_clip_pop: Population gradient clipping. ``None`` selects the
+            per-algorithm default when the population channel is
+            gradient-driven; ``0`` disables clipping; positive values are
+            used as-is; negative values raise.
+        grad_clip_hyper: Hyperparameter gradient clipping. Same rules as
+            ``grad_clip_pop``.
         scheduler: Learning rate scheduler type:
             - 'plateau': Reduce on plateau (default)
             - 'step': Reduce every N generations
@@ -202,9 +233,10 @@ def minimize(
             - success: Whether target was reached
     
     Example:
-        >>> # Basic usage (classical EA)
-        >>> result = minimize(problem, GA(pop_size=100), seed=42)
-        >>> 
+        >>> # Pure classical EA (no learnable parameters, no probe, no backprop)
+        >>> result = minimize(problem, GA(pop_size=100, differentiable=False,
+        ...                               adaptive=False), seed=42)
+        >>>
         >>> # Learn operator hyperparameters with classical dynamics
         >>> from evograd.operators import SBX, PolynomialMutation
         >>> algorithm = GA(
@@ -213,12 +245,13 @@ def minimize(
         ...     mutation=PolynomialMutation(eta=20, differentiable=True),
         ...     differentiable=False,  # Population not updated via gradients
         ...     )
-        >>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000),
-        ...                   lr_hyper=-1)
-        >>> 
-        >>> # Full differentiable mode
+        >>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000))
+        >>>
+        >>> # Full differentiable mode: learning rates resolve to the
+        >>> # per-algorithm defaults automatically when the objective
+        >>> # provides a gradient
         >>> algorithm = GA(pop_size=100, differentiable=True)
-        >>> result = minimize(problem, algorithm, lr_pop=-1, lr_hyper=-1)
+        >>> result = minimize(problem, algorithm)
         >>>
         >>> # Continue optimization with a different problem (e.g., surrogate -> true)
         >>> # First optimize with surrogate problem
@@ -323,31 +356,128 @@ def minimize(
         else:
             hyper_params.append(p)
     
-    use_backprop = (len(pop_params) > 0) or (len(hyper_params) > 0)
-    
-    lr_pop_eff, lr_hyper_eff, grad_clip_pop, grad_clip_hyper, defaults = _resolve_opt_defaults(
-    algorithm, problem, lr_pop, lr_hyper, grad_clip_pop, grad_clip_hyper)
-    
+    # The former -1 sentinel raises on every path, including optimizer=.
+    for _lr_label, _lr_value in (("lr_pop", lr_pop), ("lr_hyper", lr_hyper)):
+        if _lr_value is not None and _lr_value < 0:
+            raise ValueError(
+                f"{_lr_label}={_lr_value} is invalid: negative learning "
+                "rates are not supported and the former -1 sentinel was "
+                f"removed in 0.4.0. Omit the argument ({_lr_label}=None) to "
+                "use the per-algorithm default, or pass 0 to disable "
+                "gradient updates explicitly."
+            )
+
+    # The objective-gradient probe: one RNG-neutral evaluation at the bounds
+    # midpoint, shared by both channels and run only when a channel needs it.
+    # Tri-state: True / False / None (the probe itself could not run).
+    _probe_cache: dict = {}
+
+    def _objective_provides_gradient() -> Optional[bool]:
+        if "result" not in _probe_cache:
+            batch_hint = int(
+                getattr(algorithm, "n_offsprings", None)
+                or getattr(algorithm, "pop_size", 1)
+                or 1
+            )
+            _probe_cache["result"] = _probe_objective_gradient(
+                problem, batch_hint=batch_hint
+            )
+        return _probe_cache["result"]
+
+    alg_defaults = _OPT_DEFAULTS.get(
+        algorithm.__class__.__name__, _OPT_DEFAULTS["GA"]
+    )
+
     optimizers: List[torch.optim.Optimizer] = []
     schedulers: List[Optional[torch.optim.lr_scheduler.LRScheduler]] = []
-    
-    if use_backprop:
-        # Create optimizer if not provided
-        if optimizer is None:
-            if len(pop_params) > 0 and isinstance(lr_pop_eff, (int, float)) and lr_pop_eff > 0:
-                optimizers.append(torch.optim.SGD(pop_params, lr=lr_pop_eff, momentum=defaults["pop_momentum"]))
+    lr_pop_eff: Optional[float] = None
+    lr_hyper_eff: Optional[float] = None
 
-            if len(hyper_params) > 0 and isinstance(lr_hyper_eff, (int, float)) and lr_hyper_eff > 0:
-                optimizers.append(torch.optim.Adam(hyper_params, lr=lr_hyper_eff))
-                
+    if optimizer is not None:
+        # User-supplied optimizer(s): honored only when there is something to
+        # optimise and the objective is not provably black-box (an
+        # inconclusive probe honors the explicit request).
+        if lr_pop is not None or lr_hyper is not None:
+            warnings.warn(
+                "lr_pop/lr_hyper are ignored when optimizer= is supplied; "
+                "the provided optimizer's own learning rates are used.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if not (pop_params or hyper_params):
+            warnings.warn(
+                "An optimizer was supplied but the algorithm exposes no "
+                "learnable parameters (differentiable=False and "
+                "adaptive=False); running the classical update instead.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif _objective_provides_gradient() is False:
+            warnings.warn(
+                "An optimizer was supplied but the objective does not provide "
+                "a gradient (its output carries no grad_fn); running the "
+                "classical update instead.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         else:
-            # Accept a single optimizer or a list/tuple of optimizers
             if isinstance(optimizer, (list, tuple)):
                 optimizers.extend(list(optimizer))
             else:
                 optimizers.append(optimizer)
-        
-        # Create LR scheduler
+        # Channel status reflects what the supplied optimizers actually cover.
+        _covered = {
+            id(p)
+            for opt in optimizers
+            for group in opt.param_groups
+            for p in group["params"]
+        }
+        pop_grad_on = any(id(p) in _covered for p in pop_params)
+        hyper_grad_on = any(id(p) in _covered for p in hyper_params)
+    else:
+        lr_pop_eff = _resolve_channel_lr(
+            lr_pop,
+            len(pop_params) > 0,
+            alg_defaults["lr_pop"],
+            "lr_pop",
+            "algorithm.differentiable=False",
+            _objective_provides_gradient,
+        )
+        lr_hyper_eff = _resolve_channel_lr(
+            lr_hyper,
+            len(hyper_params) > 0,
+            alg_defaults["lr_hyper"],
+            "lr_hyper",
+            "adaptive=False and no differentiable operators",
+            _objective_provides_gradient,
+        )
+        # Dimension-scale the population learning rate.
+        if lr_pop_eff is not None:
+            lr_pop_eff = lr_pop_eff / (problem.n_var ** 0.5)
+
+        if lr_pop_eff is not None:
+            optimizers.append(
+                torch.optim.SGD(
+                    pop_params, lr=lr_pop_eff,
+                    momentum=alg_defaults["pop_momentum"],
+                )
+            )
+        if lr_hyper_eff is not None:
+            optimizers.append(torch.optim.Adam(hyper_params, lr=lr_hyper_eff))
+        pop_grad_on = lr_pop_eff is not None
+        hyper_grad_on = lr_hyper_eff is not None
+
+    grad_clip_pop_eff = _resolve_channel_clip(
+        grad_clip_pop, pop_grad_on, alg_defaults["grad_clip_pop"], "grad_clip_pop"
+    )
+    grad_clip_hyper_eff = _resolve_channel_clip(
+        grad_clip_hyper, hyper_grad_on, alg_defaults["grad_clip_hyper"],
+        "grad_clip_hyper",
+    )
+
+    use_backprop = len(optimizers) > 0
+
+    if use_backprop:
         est_gens = _estimate_total_generations(termination, algorithm)
         for opt in optimizers:
             schedulers.append(
@@ -360,13 +490,14 @@ def minimize(
                     total_generations=est_gens,
                 )
             )
-        # Explicitly disabling every learning rate should also disable the
-        # backward pass; otherwise gradients accumulate without any update.
-        if not optimizers:
-            use_backprop = False
-    else:
-        optimizers = []
-        schedulers = []
+
+    # Report which channels ended up gradient-driven. The dict is shared with
+    # the first-generation diagnostic, which may still drop a channel whose
+    # parameters turn out to receive no gradient (e.g. CMA-ES's population).
+    gradient_channels = {"population": pop_grad_on, "hyperparams": hyper_grad_on}
+    builder.add_extra("gradient_channels", gradient_channels)
+    builder.add_extra("lr_pop_effective", lr_pop_eff)
+    builder.add_extra("lr_hyper_effective", lr_hyper_eff)
     
     # -------------------------------------------------------------------------
     # Create callback state
@@ -397,15 +528,16 @@ def minimize(
     
     # Reset termination state
     termination.reset()
-    
+
+    first_diff_step = True
     while not termination.should_terminate(algorithm):
         # Check callback early stopping
         if state.stop_optimisation:
             break
-        
+
         # Generation start callback
         _call_callbacks(callbacks, "on_generation_start", state)
-        
+
         # Run one generation
         if use_backprop:
             _step_differentiable(
@@ -414,11 +546,18 @@ def minimize(
                 schedulers,
                 pop_params,
                 hyper_params,
-                grad_clip_pop,
-                grad_clip_hyper,
+                grad_clip_pop_eff,
+                grad_clip_hyper_eff,
                 reduction,
                 live_selection,
+                diagnose=first_diff_step,
+                gradient_channels=gradient_channels,
             )
+            first_diff_step = False
+            if not optimizers:
+                # Every optimizer was dropped by the no-gradient diagnostic;
+                # continue with the classical update.
+                use_backprop = False
         else:
             algorithm.step()
         
@@ -486,43 +625,195 @@ def minimize(
 # Helper Functions
 # =============================================================================
 
-def _resolve_opt_defaults(
-    algorithm: "Algorithm",
-    problem: "Problem",
-    lr_pop,
-    lr_hyper,
-    grad_clip_pop,
-    grad_clip_hyper,
-):
-    """Resolve per-algorithm optimiser defaults.
+def _snapshot_rng_states(device: torch.device) -> dict:
+    """Snapshot torch (CPU and, if relevant, device), NumPy and Python
+    random-number states — the full scope seeded by ``set_seed``."""
+    states = {
+        "cpu": torch.get_rng_state(),
+        "py": random.getstate(),
+        "np": np.random.get_state(),
+    }
+    if device.type == "cuda" and torch.cuda.is_available():
+        states["cuda"] = torch.cuda.get_rng_state_all()
+    elif (
+        device.type == "mps"
+        and hasattr(torch, "mps")
+        and torch.backends.mps.is_available()
+    ):
+        states["mps"] = torch.mps.get_rng_state()
+    return states
 
-    Sentinel convention:
-        - ``-1`` means "use the per-algorithm default from ``_OPT_DEFAULTS``".
-          This is the value the benchmark CLI passes by default.
-        - ``None`` means "disable" — no optimiser / no clipping.
-          This is the value ``minimize()`` uses when the caller omits the arg.
-        - Any other numeric value is used as-is.
+
+def _restore_rng_states(states: dict) -> None:
+    torch.set_rng_state(states["cpu"])
+    random.setstate(states["py"])
+    np.random.set_state(states["np"])
+    if "cuda" in states:
+        torch.cuda.set_rng_state_all(states["cuda"])
+    if "mps" in states:
+        torch.mps.set_rng_state(states["mps"])
+
+
+def _probe_objective_gradient(problem: "Problem", batch_hint: int = 1) -> Optional[bool]:
+    """Check whether the objective provides a gradient.
+
+    Evaluates the same composite the differentiable loss is built from — the
+    objective plus, for constrained problems, the exterior constraint penalty
+    (mirroring ``Algorithm._evaluate``) — at the midpoint of the box bounds
+    with a grad-requiring input, and checks the output for a ``grad_fn``. A
+    detached / black-box composite (e.g. an objective that trains a model
+    internally and returns a plain number, with no differentiable
+    constraints) produces no graph, so gradient-based updates cannot receive
+    any real signal from it.
+
+    A single row is tried first; if the objective rejects it (e.g. it
+    requires population-sized batches, or contains BatchNorm), the probe
+    retries with ``batch_hint`` identical rows. If every attempt raises, the
+    probe is *inconclusive* and returns ``None``: auto-resolution then stays
+    classical, while explicitly requested learning rates / optimizers are
+    honored.
+
+    The probe is excluded from ``n_evals`` and RNG-neutral: torch, NumPy and
+    Python random states are snapshotted and restored, so internally
+    stochastic objectives do not perturb seeded reproducibility.
     """
-    alg_name = algorithm.__class__.__name__
-    defaults = _OPT_DEFAULTS.get(alg_name, _OPT_DEFAULTS["GA"])
+    states = _snapshot_rng_states(problem.device)
 
-    # -1 means "use defaults"; None explicitly disables that optimizer/clip.
-    if lr_pop == -1:
-        lr_pop = defaults["lr_pop"]
-    if lr_hyper == -1:
-        lr_hyper = defaults["lr_hyper"]
-    if grad_clip_pop == -1:
-        grad_clip_pop = defaults["grad_clip_pop"]
-    if grad_clip_hyper == -1:
-        grad_clip_hyper = defaults["grad_clip_hyper"]
+    def _attempt(n_rows: int) -> bool:
+        x = ((problem.xl + problem.xu) / 2.0).detach().clone().unsqueeze(0)
+        if n_rows > 1:
+            x = x.repeat(n_rows, 1)
+        x.requires_grad_(True)
+        with torch.enable_grad():
+            fitness = problem.evaluate(x)
+            if problem.has_constraints():
+                violation = problem.evaluate_constraints(x)["cv"]
+                fitness = fitness + problem.constraint_penalty * violation
+        return fitness.grad_fn is not None
 
-    # Dimension scaling only if lr_pop > 0
-    if isinstance(lr_pop, (int, float)) and lr_pop > 0:
-        lr_pop_eff = lr_pop / (problem.n_var ** 0.5)
-    else:
-        lr_pop_eff = lr_pop  # 0.0 or something explicit
+    try:
+        batch_sizes = [1] + ([int(batch_hint)] if int(batch_hint) > 1 else [])
+        last_exc: Optional[Exception] = None
+        for n_rows in batch_sizes:
+            try:
+                return _attempt(n_rows)
+            except Exception as exc:
+                last_exc = exc
+        warnings.warn(
+            "The objective-gradient probe could not run "
+            f"({type(last_exc).__name__}: {last_exc}); auto-resolution stays "
+            "classical, explicitly requested learning rates / optimizers are "
+            "honored unverified.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    finally:
+        _restore_rng_states(states)
 
-    return lr_pop_eff, lr_hyper, grad_clip_pop, grad_clip_hyper, defaults
+
+def _resolve_channel_lr(
+    value,
+    channel_active: bool,
+    default_value: float,
+    label: str,
+    flag_hint: str,
+    objective_provides_gradient,
+):
+    """Resolve one gradient channel's learning rate.
+
+    Sentinel convention (0.4.0):
+        - ``None`` means "auto": if the channel exposes learnable parameters
+          and the objective provides a gradient, the per-algorithm default is
+          used; otherwise the channel stays classical (with a warning when
+          the flag exposed learnable parameters; silently when it did not).
+        - ``0`` explicitly disables the channel (with a warning).
+        - Positive values are used verbatim, still subject to the objective
+          providing a gradient: a probe that proves the objective black-box
+          degrades to classical with a warning, while an *inconclusive*
+          probe (the probe evaluation itself failed) honors the explicit
+          request unverified.
+        - Negative values raise: the former ``-1`` sentinel was removed.
+
+    ``objective_provides_gradient`` is a tri-state callable returning
+    True / False / None (inconclusive). Returns the effective learning rate,
+    or ``None`` if the channel is off; the caller additionally scales the
+    population learning rate by 1/sqrt(n_var).
+    """
+    if value is not None and value < 0:
+        raise ValueError(
+            f"{label}={value} is invalid: negative learning rates are not "
+            "supported and the former -1 sentinel was removed in 0.4.0. "
+            f"Omit the argument ({label}=None) to use the per-algorithm "
+            "default, or pass 0 to disable gradient updates explicitly."
+        )
+    if not channel_active:
+        if value is not None and value > 0:
+            warnings.warn(
+                f"{label}={value} was given but the algorithm exposes no "
+                f"learnable parameters for this channel ({flag_hint}); "
+                "gradient updates for it stay disabled.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        return None
+    if value is None:
+        provides = objective_provides_gradient()
+        if provides is True:
+            return default_value
+        if provides is None:
+            # Inconclusive probe: auto stays conservative/classical (the
+            # probe itself already warned with the failure detail).
+            return None
+        warnings.warn(
+            f"The objective does not provide a gradient (its output carries "
+            f"no grad_fn), so {label} cannot resolve to the per-algorithm "
+            "default; gradient updates for this channel stay disabled.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+    if value == 0:
+        warnings.warn(
+            f"{label}=0 explicitly disables gradient updates for this channel.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+    provides = objective_provides_gradient()
+    if provides is False:
+        warnings.warn(
+            f"{label}={value} was requested but the objective does not "
+            "provide a gradient (its output carries no grad_fn); gradient "
+            "updates for this channel stay disabled.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
+    # provides is True, or inconclusive with an explicit request: honor it.
+    return float(value)
+
+
+def _resolve_channel_clip(value, channel_on: bool, default_value: float, label: str):
+    """Resolve one channel's gradient-clipping threshold.
+
+    ``None`` selects the per-algorithm default when the channel is
+    gradient-driven; ``0`` disables clipping; positive values are used as-is;
+    negative values raise (the former ``-1`` sentinel was removed).
+    """
+    if value is not None and value < 0:
+        raise ValueError(
+            f"{label}={value} is invalid: the former -1 sentinel was removed "
+            f"in 0.4.0. Omit the argument ({label}=None) for the per-algorithm "
+            "default, or pass 0 to disable clipping."
+        )
+    if not channel_on:
+        return None
+    if value is None:
+        return default_value
+    if value == 0:
+        return None
+    return float(value)
 
 def _parse_termination(termination: Optional[Termination]) -> Termination:
     """
@@ -752,6 +1043,8 @@ def _step_differentiable(
     grad_clip_hyper: Optional[float],
     reduction: str = "mean",
     live_selection: bool = True,
+    diagnose: bool = False,
+    gradient_channels: Optional[dict] = None,
 ) -> float:
     """
     Perform one generation step with gradient-based updates.
@@ -789,7 +1082,52 @@ def _step_differentiable(
     
     # Backward pass
     loss.backward()
-    
+
+    # First-generation diagnostic: a channel whose parameters receive no
+    # gradient at all cannot be moved by its optimizer (e.g. CMA-ES's
+    # population Parameter never enters the loss graph -- offspring are
+    # resampled from the mean). Drop such optimizers instead of silently
+    # stepping them for the whole run.
+    if diagnose and optimizers:
+        pop_ids = {id(p) for p in (pop_params or [])}
+        hyper_ids = {id(p) for p in (hyper_params or [])}
+        kept_opts: List[torch.optim.Optimizer] = []
+        kept_scheds: List[Optional[torch.optim.lr_scheduler.LRScheduler]] = []
+        for opt, sch in zip(optimizers, schedulers):
+            params = [p for group in opt.param_groups for p in group["params"]]
+            if params and all(p.grad is None for p in params):
+                param_ids = {id(p) for p in params}
+                if param_ids <= pop_ids:
+                    label = "population"
+                elif param_ids <= hyper_ids:
+                    label = "hyperparameter"
+                else:
+                    label = "supplied"
+                warnings.warn(
+                    f"The {label} optimizer received no gradient on the first "
+                    "generation (every parameter's grad is None); it is "
+                    "dropped for the remainder of the run.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            kept_opts.append(opt)
+            kept_scheds.append(sch)
+        optimizers[:] = kept_opts
+        schedulers[:] = kept_scheds
+        # Recompute channel status from the optimizers that actually remain,
+        # so result.extra['gradient_channels'] stays truthful for mixed or
+        # partially covering optimizers as well.
+        if gradient_channels is not None:
+            kept_ids = {
+                id(p)
+                for opt in optimizers
+                for group in opt.param_groups
+                for p in group["params"]
+            }
+            gradient_channels["population"] = bool(kept_ids & pop_ids)
+            gradient_channels["hyperparams"] = bool(kept_ids & hyper_ids)
+
     # Gradient clipping
     if grad_clip_pop is not None and pop_params:
         torch.nn.utils.clip_grad_norm_(pop_params, grad_clip_pop)

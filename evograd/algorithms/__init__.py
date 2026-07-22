@@ -29,11 +29,11 @@ Example:
     >>> 
     >>> # Genetic Algorithm
     >>> ga = GA(pop_size=100, differentiable=True)
-    >>> result = minimize(problem, ga, MaxEvaluations(10000), lr_pop=-1, lr_hyper=-1)
+    >>> result = minimize(problem, ga, MaxEvaluations(10000))
     >>> 
     >>> # Differential Evolution
     >>> de = DE(pop_size=100, variant="DE/rand/1/bin", adaptive=True)
-    >>> result = minimize(problem, de, MaxEvaluations(10000), lr_hyper=-1)
+    >>> result = minimize(problem, de, MaxEvaluations(10000))
     >>> 
     >>> # SHADE (Self-Adaptive DE)
     >>> shade = SHADE(pop_size=100, memory_size=100)
@@ -45,11 +45,11 @@ Example:
     >>> 
     >>> # Particle Swarm Optimisation
     >>> pso = PSO(pop_size=100, adaptive=True)
-    >>> result = minimize(problem, pso, MaxEvaluations(10000), lr_hyper=-1)
+    >>> result = minimize(problem, pso, MaxEvaluations(10000))
     >>> 
     >>> # CMA-ES
     >>> cmaes = CMAES(pop_size=50, adaptive=True)
-    >>> result = minimize(problem, cmaes, MaxEvaluations(10000), lr_hyper=-1)
+    >>> result = minimize(problem, cmaes, MaxEvaluations(10000))
 """
 
 # Genetic Algorithm

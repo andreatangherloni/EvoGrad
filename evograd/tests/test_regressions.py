@@ -42,28 +42,43 @@ def sphere(x):
     return x.square().sum(dim=-1)
 
 
-def test_default_lr_is_classical_and_minus_one_learns():
+def test_explicit_zero_is_classical_and_auto_learns():
     problem = Problem(sphere, 3, -5.0, 5.0)
 
+    # lr_hyper=0 explicitly freezes the hyperparameter channel (with warning).
     classical = DE(pop_size=8, adaptive=True, differentiable=False)
     name, parameter = next((n, p) for n, p in classical.named_parameters() if p.requires_grad)
     before = parameter.detach().clone()
-    minimize(problem, classical, MaxEvaluations(16), seed=1, verbose=False)
-    assert torch.equal(parameter.detach(), before), f"{name} changed with lr_hyper=None"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        minimize(problem, classical, MaxEvaluations(16), seed=1, verbose=False,
+                 lr_hyper=0)
+    assert torch.equal(parameter.detach(), before), f"{name} changed with lr_hyper=0"
     assert all(p.grad is None for p in classical.parameters())
+    assert any("explicitly disables" in str(item.message) for item in caught)
 
+    # lr_hyper=None (auto) resolves to the per-algorithm default and learns.
     learned = DE(pop_size=8, adaptive=True, differentiable=False)
     _, learned_parameter = next((n, p) for n, p in learned.named_parameters() if p.requires_grad)
     before = learned_parameter.detach().clone()
-    minimize(
+    result = minimize(
         problem,
         learned,
         MaxEvaluations(16),
         seed=1,
         verbose=False,
-        lr_hyper=-1,
     )
     assert not torch.equal(learned_parameter.detach(), before)
+    assert result.extra["gradient_channels"]["hyperparams"] is True
+
+    # The former -1 sentinel is removed and raises.
+    try:
+        minimize(problem, DE(pop_size=8), MaxEvaluations(16), seed=1,
+                 verbose=False, lr_hyper=-1)
+    except ValueError as exc:
+        assert "-1 sentinel was removed" in str(exc)
+    else:
+        raise AssertionError("lr_hyper=-1 must raise ValueError")
 
 
 def test_best_solution_fitness_pairing():
@@ -95,10 +110,6 @@ def test_pso_population_fitness_consistency():
             MaxGenerations(40),
             seed=0,
             verbose=False,
-            lr_pop=-1,
-            lr_hyper=-1,
-            grad_clip_pop=-1,
-            grad_clip_hyper=-1,
         )
         recomputed = problem.evaluate(result.population)
         assert float((recomputed - result.fitness).abs().max()) < 1e-6, kwargs
@@ -177,7 +188,6 @@ def test_lshade_reduces_in_classical_and_differentiable_modes():
             MaxEvaluations(50),
             seed=2,
             verbose=False,
-            lr_pop=-1 if differentiable else None,
         )
         assert result.n_evals == 50
         assert algorithm.pop_size == len(algorithm.population) == 4
@@ -322,7 +332,6 @@ def test_cmaes_soft_weights_are_scale_invariant_and_converge():
         MaxEvaluations(2000),
         seed=0,
         verbose=False,
-        lr_pop=-1,
     )
     assert result.best_fitness < 1e-8, result.best_fitness
 
@@ -349,7 +358,7 @@ def test_bound_enforcement_is_operator_and_mode_independent():
     # No algorithm/operator/mode combination may evaluate or return a point
     # outside [xl, xu]. The optimum is pulled to the upper corner to stress it.
     xl, xu, d = -1.0, 1.0, 8
-    lr = dict(lr_pop=-1, lr_hyper=-1, grad_clip_pop=-1, grad_clip_hyper=-1)
+    lr = {}  # auto: learning rates resolve to per-algorithm defaults
     cases = (
         # GA bound safety must not depend on the mutation operator (a
         # non-clamping Gaussian mutation with no repair used to escape badly).
@@ -400,7 +409,7 @@ def test_result_exposes_raw_objective_when_infeasible():
 
 
 TESTS = (
-    test_default_lr_is_classical_and_minus_one_learns,
+    test_explicit_zero_is_classical_and_auto_learns,
     test_best_solution_fitness_pairing,
     test_pso_population_fitness_consistency,
     test_constraints_and_result_feasibility_flag,

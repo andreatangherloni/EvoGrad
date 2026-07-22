@@ -36,8 +36,7 @@ Quick Start
 ... )
 >>>
 >>> # Run optimization
->>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000), seed=42,
-...                   lr_pop=-1, lr_hyper=-1)
+>>> result = minimize(problem, algorithm, termination=MaxEvaluations(10000), seed=42)
 >>> print(f"Best fitness: {result.best_fitness:.6f}")
 
 Architecture
@@ -58,7 +57,7 @@ Authors
 Andrea Tangherloni <andrea.tangherloni@unibocconi.it>
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "Andrea Tangherloni"
 
 __all__ = [
