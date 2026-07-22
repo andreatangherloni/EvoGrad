@@ -121,12 +121,14 @@ def expand_param(
     
     Args:
         param: Optional override parameter. Can be:
-            - None: Use default
-            - scalar: Same value for all [N, D]
-            - [D]: Per-gene, broadcast to [N, D]
-            - [N]: Per-individual, broadcast to [N, D]
-              (when N == D, use [1, D] or [N, 1] to disambiguate)
-            - [N, D]: Use as-is
+
+            - ``None``: Use default
+            - scalar: Same value for all ``[N, D]``
+            - ``[D]``: Per-gene, broadcast to ``[N, D]``
+            - ``[N]``: Per-individual, broadcast to ``[N, D]``
+              (when ``N == D``, use ``[1, D]`` or ``[N, 1]`` to disambiguate)
+            - ``[N, D]``: Use as-is
+
         default: Default value if param is None.
         n_pop: Number of individuals (N).
         n_var: Number of variables (D).
